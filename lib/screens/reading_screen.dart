@@ -119,6 +119,7 @@ class _ReadingScreenState extends State<ReadingScreen> {
       time: const TimeOfDay(hour: 21, minute: 0),
     );
     await StorageService.markTaskCompleted(level, taskNumber);
+    await StorageService.markCompletionDate(DateTime.now());
 
     // Notify parent
     completedTaskIds.add(StorageService.taskId(level, taskNumber));

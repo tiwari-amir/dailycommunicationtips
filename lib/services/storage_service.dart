@@ -7,6 +7,7 @@ class StorageService {
   static const String tasksKey = 'tasksCompleted';
   static const String completedTaskIdsKey = 'completedTaskIds';
   static const String unlockAllKey = 'unlockAll';
+  static const String completedDatesKey = 'completedDates';
 
   static Future<int> updateStreak() async {
     final prefs = await SharedPreferences.getInstance();
@@ -99,6 +100,29 @@ class StorageService {
     }
   }
 
+  static Future<void> markCompletionDate(DateTime date) async {
+    final prefs = await SharedPreferences.getInstance();
+    final dates = prefs.getStringList(completedDatesKey) ?? <String>[];
+    final dayKey = _dateKey(date);
+    if (!dates.contains(dayKey)) {
+      dates.add(dayKey);
+      await prefs.setStringList(completedDatesKey, dates);
+    }
+  }
+
+  static Future<Set<String>> loadCompletedDates() async {
+    final prefs = await SharedPreferences.getInstance();
+    final dates = prefs.getStringList(completedDatesKey) ?? <String>[];
+    return dates.toSet();
+  }
+
+  static String _dateKey(DateTime date) {
+    final y = date.year.toString().padLeft(4, '0');
+    final m = date.month.toString().padLeft(2, '0');
+    final d = date.day.toString().padLeft(2, '0');
+    return '$y-$m-$d';
+  }
+
   static Future<bool> isTaskCompleted(int level, int taskNumber) async {
     final ids = await loadCompletedTaskIds();
     return ids.contains(taskId(level, taskNumber));
@@ -121,6 +145,7 @@ class StorageService {
     await prefs.remove(levelKey);
     await prefs.remove(tasksKey);
     await prefs.remove(completedTaskIdsKey);
+    await prefs.remove(completedDatesKey);
     await prefs.remove(unlockAllKey);
   }
 }

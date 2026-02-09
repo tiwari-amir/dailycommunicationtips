@@ -77,6 +77,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   int currentTaskNumber = 1;
   int streak = 0;
   Set<String> completedTaskIds = {};
+  Set<String> completedDates = {};
   bool unlockAllLevels = false;
   late final AnimationController _pulseController;
 
@@ -99,9 +100,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   Future<void> _loadCompletedTasks() async {
     final ids = await StorageService.loadCompletedTaskIds();
+    final dates = await StorageService.loadCompletedDates();
     final nextActive = _findNextIncompleteTaskFromIds(ids);
     setState(() {
       completedTaskIds = ids;
+      completedDates = dates;
       if (nextActive != null) {
         currentLevel = nextActive.level;
         currentTaskNumber = nextActive.taskNumber;
@@ -510,6 +513,73 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     );
   }
 
+  void _showCalendarDialog() {
+    final now = DateTime.now();
+    final firstDay = DateTime(now.year, now.month, 1);
+    final daysInMonth = DateTime(now.year, now.month + 1, 0).day;
+    final leadingEmpty = (firstDay.weekday % 7); // 0=Sun
+
+    final totalCells = leadingEmpty + daysInMonth;
+    final rows = (totalCells / 7).ceil();
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('This Month'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: const [
+                    _WeekdayLabel('S'),
+                    _WeekdayLabel('M'),
+                    _WeekdayLabel('T'),
+                    _WeekdayLabel('W'),
+                    _WeekdayLabel('T'),
+                    _WeekdayLabel('F'),
+                    _WeekdayLabel('S'),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Column(
+                  children: List.generate(rows, (row) {
+                    return Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: List.generate(7, (col) {
+                        final index = row * 7 + col;
+                        final dayNum = index - leadingEmpty + 1;
+                        if (dayNum < 1 || dayNum > daysInMonth) {
+                          return const _DayCell.empty();
+                        }
+                        final dayKey =
+                            '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${dayNum.toString().padLeft(2, '0')}';
+                        final isDone = completedDates.contains(dayKey);
+                        return _DayCell(
+                          day: dayNum,
+                          isDone: isDone,
+                        );
+                      }),
+                    );
+                  }),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   void dispose() {
     _pulseController.dispose();
@@ -524,6 +594,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         .where((t) => completedTaskIds.contains(StorageService.taskId(t.level, t.taskNumber)))
         .length;
     double progress = (completedInLevel / totalTasks).clamp(0.0, 1.0);
+    final overallProgress =
+        (completedTaskIds.length / allTasks.length).clamp(0.0, 1.0);
     final nextActive = _findNextIncompleteTask();
     final screenWidth = MediaQuery.of(context).size.width;
     final horizontalPadding = screenWidth < 370 ? 16.0 : 24.0;
@@ -590,6 +662,19 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
+                            Container(
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: IconButton(
+                                icon: const Icon(Icons.calendar_month_rounded,
+                                    color: Colors.white),
+                                onPressed: _showCalendarDialog,
+                                tooltip: 'Monthly progress',
+                              ),
+                            ),
+                            const SizedBox(width: 8),
                             _buildStreakChip(),
                             const SizedBox(width: 10),
                             Container(
@@ -637,9 +722,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
                           Text(
                             'PROGRESS',
                             style: TextStyle(
@@ -665,8 +750,17 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                               ),
                             ),
                           ),
-                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Overall: ${(overallProgress * 100).toInt()}% complete',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white.withOpacity(0.8),
                         ),
+                      ),
                       const SizedBox(height: 12),
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.end,
@@ -972,6 +1066,60 @@ class _TaskRef {
   final int taskNumber;
 
   _TaskRef(this.level, this.taskNumber);
+}
+
+class _WeekdayLabel extends StatelessWidget {
+  final String label;
+  const _WeekdayLabel(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 32,
+      child: Center(
+        child: Text(
+          label,
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+      ),
+    );
+  }
+}
+
+class _DayCell extends StatelessWidget {
+  final int? day;
+  final bool isDone;
+  const _DayCell({this.day, this.isDone = false});
+  const _DayCell.empty({super.key}) : day = null, isDone = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 32,
+      height: 32,
+      child: day == null
+          ? const SizedBox.shrink()
+          : Container(
+              decoration: BoxDecoration(
+                color: isDone ? kAccentPrimary.withOpacity(0.8) : Colors.transparent,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: isDone ? kAccentPrimary : Colors.black12,
+                ),
+              ),
+              child: Center(
+                child: Text(
+                  '$day',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: isDone ? Colors.white : Colors.black87,
+                  ),
+                ),
+              ),
+            ),
+    );
+  }
 }
 
 class _BadgePainter extends CustomPainter {
