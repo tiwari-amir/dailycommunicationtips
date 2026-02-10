@@ -100,6 +100,11 @@ class StorageService {
     }
   }
 
+  static Future<void> setCompletedTaskIds(Set<String> ids) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(completedTaskIdsKey, ids.toList());
+  }
+
   static Future<void> markCompletionDate(DateTime date) async {
     final prefs = await SharedPreferences.getInstance();
     final dates = prefs.getStringList(completedDatesKey) ?? <String>[];

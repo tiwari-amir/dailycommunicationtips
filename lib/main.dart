@@ -114,7 +114,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   Future<void> _loadUnlockAll() async {
     final value = await StorageService.getUnlockAll();
+    if (!mounted) return;
     setState(() => unlockAllLevels = value);
+    if (value) {
+      await _markAllTasksCompleted();
+    }
   }
 
   void _startTask() {
@@ -155,6 +159,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   Future<void> _unlockAllLevels() async {
     await StorageService.setUnlockAll(true);
+    await _markAllTasksCompleted();
+    if (!mounted) return;
     setState(() => unlockAllLevels = true);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -164,6 +170,19 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         duration: Duration(seconds: 2),
       ),
     );
+  }
+
+  Future<void> _markAllTasksCompleted() async {
+    final ids = allTasks
+        .map((t) => StorageService.taskId(t.level, t.taskNumber))
+        .toSet();
+    await StorageService.setCompletedTaskIds(ids);
+    if (!mounted) return;
+    setState(() {
+      completedTaskIds = ids;
+      currentLevel = 20;
+      currentTaskNumber = _getTotalTasksForLevel(20);
+    });
   }
 
   void _showSettingsSheet() {
@@ -336,17 +355,6 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     }
   }
 
-  Color _levelWatermarkColor(int level) {
-    final start = const Color(0xFFB9C4D9);
-    final mid = const Color(0xFF7DA6FF);
-    final high = const Color(0xFFFFD07A);
-    final t = (level - 1) / 19.0;
-    if (t < 0.6) {
-      return Color.lerp(start, mid, t / 0.6)!;
-    }
-    return Color.lerp(mid, high, (t - 0.6) / 0.4)!;
-  }
-
   _TaskRef? _findNextIncompleteTask() {
     for (final task in allTasks) {
       final id = StorageService.taskId(task.level, task.taskNumber);
@@ -367,16 +375,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     return null;
   }
 
-  int _badgeStars(int level) {
-    final stars = (level / 4).ceil();
-    return stars.clamp(1, 5);
-  }
-
-  Widget _buildLevelBadge() {
-    final displayLevel = unlockAllLevels ? 20 : currentLevel;
-    final colors = _badgeColors(displayLevel);
-    final tier = (displayLevel / 4).ceil().clamp(1, 5);
-    final glow = 0.25 + (displayLevel / 20.0) * 0.35;
+  Widget _buildLevelBadge(int displayLevel) {
     return AnimatedBuilder(
       animation: _pulseController,
       builder: (context, child) {
@@ -384,38 +383,36 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         return Transform.scale(
           scale: pulse,
           child: Container(
-            padding: const EdgeInsets.all(2),
             decoration: BoxDecoration(
-              gradient: LinearGradient(colors: colors),
-              borderRadius: BorderRadius.circular(22),
+              color: Colors.white.withOpacity(0.08),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.white.withOpacity(0.25)),
               boxShadow: [
                 BoxShadow(
-                  color: colors.last.withOpacity(glow + (_pulseController.value * 0.1)),
-                  blurRadius: 20 + displayLevel * 0.4,
+                  color: Colors.black.withOpacity(0.18),
+                  blurRadius: 14,
                   offset: const Offset(0, 8),
                 ),
               ],
             ),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.white.withOpacity(0.45)),
-              ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  CustomPaint(
-                    size: const Size(36, 36),
-                    painter: _BadgePainter(
-                      t: displayLevel / 20.0,
-                      colors: colors,
-                      tier: tier,
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.white.withOpacity(0.12),
+                      border: Border.all(color: Colors.white.withOpacity(0.35)),
                     ),
-                    child: const SizedBox(width: 36, height: 36),
+                    child: LevelBadgeSprite(
+                      level: displayLevel,
+                      size: 44,
+                    ),
                   ),
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 12),
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -425,6 +422,15 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
                           color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Current badge',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white.withOpacity(0.8),
                         ),
                       ),
                       if (unlockAllLevels)
@@ -440,19 +446,6 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                             ),
                           ),
                         ),
-                      Row(
-                        children: List.generate(
-                          _badgeStars(displayLevel),
-                          (index) => const Padding(
-                            padding: EdgeInsets.only(right: 2.0),
-                            child: Icon(
-                              Icons.star_rounded,
-                              size: 12,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ),
-                      ),
                     ],
                   ),
                 ],
@@ -462,22 +455,6 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         );
       },
     );
-  }
-
-  List<Color> _badgeColors(int level) {
-    final t = (level - 1) / 19.0;
-    final h1 = (210 + 140 * math.sin(t * math.pi)).clamp(0, 360);
-    final h2 = (h1 + 60 + 40 * math.cos(t * math.pi * 2)).clamp(0, 360);
-    final s1 = 0.55 + 0.35 * math.sin(t * math.pi / 2);
-    final s2 = 0.65 + 0.25 * math.cos(t * math.pi / 2);
-    final l1 = 0.45 + 0.2 * t;
-    final l2 = 0.55 + 0.2 * t;
-    return [
-      HSLColor.fromAHSL(1, h1.toDouble(), s1.clamp(0.4, 0.9), l1.clamp(0.3, 0.75))
-          .toColor(),
-      HSLColor.fromAHSL(1, h2.toDouble(), s2.clamp(0.4, 0.9), l2.clamp(0.35, 0.8))
-          .toColor(),
-    ];
   }
 
   Widget _buildStreakChip() {
@@ -506,6 +483,144 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               fontSize: 18,
               fontWeight: FontWeight.bold,
               color: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMiniRing(int percent, String label, int sectionCount) {
+    final ringSize = sectionCount <= 2 ? 42.0 : sectionCount == 3 ? 36.0 : 32.0;
+    final fontSize = sectionCount <= 2 ? 11.0 : sectionCount == 3 ? 10.0 : 9.0;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withOpacity(0.18)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: ringSize,
+            height: ringSize,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                CircularProgressIndicator(
+                  value: 1,
+                  strokeWidth: 5,
+                  valueColor: AlwaysStoppedAnimation<Color>(
+                    Colors.white.withOpacity(0.12),
+                  ),
+                ),
+                CircularProgressIndicator(
+                  value: percent / 100,
+                  strokeWidth: 5,
+                  backgroundColor: Colors.transparent,
+                  valueColor: const AlwaysStoppedAnimation<Color>(
+                    kAccentSecondary,
+                  ),
+                ),
+                Text(
+                  '$percent%',
+                  style: TextStyle(
+                    fontSize: fontSize,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white.withOpacity(0.9),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Colors.white.withOpacity(0.85),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProgressRing(double progress, int percent) {
+    return SizedBox(
+      width: 150,
+      height: 150,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          SizedBox(
+            width: 140,
+            height: 140,
+            child: CircularProgressIndicator(
+              value: 1,
+              strokeWidth: 12,
+              valueColor: AlwaysStoppedAnimation<Color>(
+                Colors.white.withOpacity(0.12),
+              ),
+            ),
+          ),
+          SizedBox(
+            width: 140,
+            height: 140,
+            child: ShaderMask(
+              shaderCallback: (rect) {
+                return SweepGradient(
+                  startAngle: -math.pi / 2,
+                  endAngle: (math.pi * 2) - (math.pi / 2),
+                  colors: const [
+                    kAccentPrimary,
+                    kAccentSecondary,
+                    kAccentTertiary,
+                  ],
+                  stops: const [0.0, 0.6, 1.0],
+                ).createShader(rect);
+              },
+              child: CircularProgressIndicator(
+                value: progress,
+                strokeWidth: 12,
+                backgroundColor: Colors.transparent,
+                valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+              ),
+            ),
+          ),
+          Container(
+            width: 106,
+            height: 106,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white.withOpacity(0.1),
+              border: Border.all(color: Colors.white.withOpacity(0.2)),
+            ),
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '$percent%',
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white.withOpacity(0.95),
+                    ),
+                  ),
+                  Text(
+                    'Overall',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white.withOpacity(0.75),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -588,14 +703,32 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
-    int totalTasks = _getTotalTasksForLevel(currentLevel);
-    final completedInLevel = allTasks
-        .where((t) => t.level == currentLevel)
-        .where((t) => completedTaskIds.contains(StorageService.taskId(t.level, t.taskNumber)))
-        .length;
-    double progress = (completedInLevel / totalTasks).clamp(0.0, 1.0);
-    final overallProgress =
-        (completedTaskIds.length / allTasks.length).clamp(0.0, 1.0);
+    final communicationTotal = allTasks.length;
+    final communicationCompleted = completedTaskIds.length;
+    const smallTalkTotal = 0;
+    const smallTalkCompleted = 0;
+    final totalTasks = communicationTotal + smallTalkTotal;
+    final totalCompleted = communicationCompleted + smallTalkCompleted;
+    final overallProgress = unlockAllLevels || totalTasks == 0
+        ? 1.0
+        : (totalCompleted / totalTasks).clamp(0.0, 1.0);
+    final overallPercent = (overallProgress * 100).round();
+    final communicationPercent = communicationTotal == 0
+        ? 0
+        : ((communicationCompleted / communicationTotal) * 100).round();
+    final smallTalkPercent =
+        smallTalkTotal == 0 ? 0 : ((smallTalkCompleted / smallTalkTotal) * 100).round();
+    final communicationComplete =
+        communicationTotal == 0 || communicationCompleted == communicationTotal;
+    final smallTalkComplete = smallTalkTotal == 0 || smallTalkCompleted == smallTalkTotal;
+    final allSectionsComplete = communicationComplete && smallTalkComplete;
+    final gatedLevel = unlockAllLevels || allSectionsComplete
+        ? currentLevel
+        : math.min(currentLevel, 19);
+    final sectionProgress = [
+      {'label': 'Communication', 'percent': communicationPercent},
+      {'label': 'Small talk', 'percent': smallTalkPercent},
+    ];
     final nextActive = _findNextIncompleteTask();
     final screenWidth = MediaQuery.of(context).size.width;
     final horizontalPadding = screenWidth < 370 ? 16.0 : 24.0;
@@ -623,42 +756,19 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.08),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.white.withOpacity(0.2)),
-                      ),
-                      child: Text(
-                        'Daily Communication Tips',
-                        textAlign: TextAlign.center,
-                        style: GoogleFonts.robotoFlex(
-                          fontSize: 20,
-                          fontWeight: FontWeight.w600,
-                          fontStyle: FontStyle.italic,
-                          letterSpacing: 1.0,
-                          color: Colors.white,
-                          shadows: [
-                            Shadow(
-                              color: Colors.black.withOpacity(0.4),
-                              blurRadius: 8,
-                              offset: const Offset(0, 2),
-                            ),
-                            Shadow(
-                              color: Colors.white.withOpacity(0.5),
-                              blurRadius: 10,
-                            ),
-                          ],
-                        ),
-                      ),
+                    Image.asset(
+                      'assets/images/title.png',
+                      height: 84,
+                      fit: BoxFit.contain,
                     ),
                     const SizedBox(height: 16),
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        _buildLevelBadge(),
+                        Expanded(
+                          child: _buildLevelBadge(gatedLevel),
+                        ),
+                        const SizedBox(width: 12),
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -668,8 +778,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                                 borderRadius: BorderRadius.circular(14),
                               ),
                               child: IconButton(
-                                icon: const Icon(Icons.calendar_month_rounded,
-                                    color: Colors.white),
+                                icon: const Icon(
+                                  Icons.calendar_month_rounded,
+                                  color: Colors.white,
+                                ),
                                 onPressed: _showCalendarDialog,
                                 tooltip: 'Monthly progress',
                               ),
@@ -722,331 +834,123 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            'PROGRESS',
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 2,
-                              color: Colors.white.withOpacity(0.85),
-                            ),
-                          ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.15),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(color: Colors.white.withOpacity(0.35)),
-                            ),
-                            child: Text(
-                              '${(progress * 100).toInt()}% Complete',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white.withOpacity(0.9),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Overall: ${(overallProgress * 100).toInt()}% complete',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.white.withOpacity(0.8),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text(
-                            '$completedInLevel',
-                            style: TextStyle(
-                              fontSize: 36,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white.withOpacity(0.95),
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 6),
-                            child: Text(
-                              'tasks mastered',
-                              style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.white.withOpacity(0.8),
-                              ),
-                            ),
-                          ),
-                          const Spacer(),
-                          Text(
-                            '$totalTasks total',
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: Colors.white.withOpacity(0.8),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 24),
-                      LayoutBuilder(
-                        builder: (context, constraints) {
-                          final clamped = progress.clamp(0.0, 1.0);
-                          return TweenAnimationBuilder<double>(
-                            tween: Tween<double>(begin: 0, end: clamped),
-                            duration: const Duration(milliseconds: 700),
-                            curve: Curves.easeOutCubic,
-                            builder: (context, value, child) {
-                              final barWidth = constraints.maxWidth * value;
-                              final knobLeft =
-                                  (barWidth - 14).clamp(0.0, constraints.maxWidth - 28);
-                              return Stack(
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Expanded(
+                              child: Column(
                                 children: [
-                                  Container(
-                                    height: 18,
-                                    decoration: BoxDecoration(
-                                      color: Colors.white.withOpacity(0.06),
-                                      borderRadius: BorderRadius.circular(24),
-                                      border: Border.all(
-                                        color: Colors.white.withOpacity(0.25),
-                                        width: 1,
-                                      ),
-                                    ),
+                                  TweenAnimationBuilder<double>(
+                                    tween: Tween<double>(begin: 0, end: overallProgress),
+                                    duration: const Duration(milliseconds: 900),
+                                    curve: Curves.easeOutCubic,
+                                    builder: (context, value, child) {
+                                      return _buildProgressRing(value, overallPercent);
+                                    },
                                   ),
-                                  Container(
-                                    height: 18,
-                                    width: barWidth,
-                                    decoration: BoxDecoration(
-                                      gradient: const LinearGradient(
-                                        colors: [
-                                          kAccentPrimary,
-                                          kAccentSecondary,
-                                          kAccentTertiary,
-                                        ],
-                                      ),
-                                      borderRadius: BorderRadius.circular(24),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: kAccentSecondary.withOpacity(0.5),
-                                          blurRadius: 12,
-                                          offset: const Offset(0, 4),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  Positioned.fill(
-                                    child: IgnorePointer(
-                                      child: Opacity(
-                                        opacity: 0.35,
-                                        child: Container(
-                                          margin: const EdgeInsets.all(2),
-                                          decoration: BoxDecoration(
-                                            borderRadius: BorderRadius.circular(20),
-                                            gradient: LinearGradient(
-                                              begin: Alignment.topLeft,
-                                              end: Alignment.bottomRight,
-                                              colors: [
-                                                Colors.white.withOpacity(0.2),
-                                                Colors.transparent,
-                                              ],
-                                            ),
-                                          ),
+                                  const SizedBox(height: 12),
+                                  SizedBox(
+                                    height: 34,
+                                    child: ElevatedButton(
+                                      onPressed: _startTask,
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: const Color(0xFF5F67FF),
+                                        foregroundColor: Colors.white,
+                                        elevation: 3,
+                                        padding: const EdgeInsets.symmetric(horizontal: 18),
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(14),
                                         ),
                                       ),
-                                    ),
-                                  ),
-                                  Positioned(
-                                    left: knobLeft,
-                                    top: -6,
-                                    child: Container(
-                                      width: 28,
-                                      height: 28,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: Colors.white,
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: Colors.black.withOpacity(0.2),
-                                            blurRadius: 12,
-                                          ),
-                                        ],
-                                      ),
-                                      child: Center(
-                                        child: Container(
-                                          width: 12,
-                                          height: 12,
-                                          decoration: const BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            color: kAccentPrimary,
-                                          ),
+                                      child: const Text(
+                                        'Do task',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
                                         ),
                                       ),
                                     ),
                                   ),
                                 ],
-                              );
-                            },
-                          );
-                        },
-                      ),
-                      const SizedBox(height: 10),
-                      Text(
-                        nextActive == null
-                            ? 'Course complete. You finished all 20 levels.'
-                            : 'Next up: Level ${nextActive.level} Task ${nextActive.taskNumber}',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.white.withOpacity(0.8),
-                        ),
-                      ),
-                      const SizedBox(height: 32),
-                      SizedBox(
-                        width: double.infinity,
-                        height: 56,
-                        child: ElevatedButton(
-                          onPressed: _startTask,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF5F67FF),
-                            foregroundColor: Colors.white,
-                            elevation: 6,
-                            shadowColor: const Color(0xFF5F67FF).withOpacity(0.4),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
+                              ),
                             ),
-                          ),
-                          child: const Text(
-                            "Start Today's Task",
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
+                            const SizedBox(width: 18),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'SECTION PROGRESS',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 2,
+                                    color: Colors.white.withOpacity(0.85),
+                                  ),
+                                ),
+                                const SizedBox(height: 10),
+                                ...sectionProgress.map(
+                                  (section) => Padding(
+                                    padding: const EdgeInsets.only(bottom: 10),
+                                    child: _buildMiniRing(
+                                      section['percent'] as int,
+                                      section['label'] as String,
+                                      sectionProgress.length,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                Text(
+                                  allSectionsComplete
+                                      ? 'Course complete. You finished all 20 levels.'
+                                      : nextActive == null
+                                          ? 'Complete other sections to reach Level 20.'
+                                          : 'Next up: Level ${nextActive.level} Task ${nextActive.taskNumber}',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.white.withOpacity(0.8),
+                                  ),
+                                ),
+                              ],
                             ),
-                          ),
+                          ],
                         ),
-                      ),
                       ],
                     ),
                   ),
                 ),
 
                 const SizedBox(height: 40),
-                const Text(
-                  'Your Path',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                    letterSpacing: 0.5,
-                  ),
+                _SectionCard(
+                  title: 'Communication tips',
+                  subtitle: 'Levels, tasks, and mastery',
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => SectionsScreen(
+                          initialIndex: 0,
+                          gatedLevel: gatedLevel,
+                          unlockAllLevels: unlockAllLevels,
+                          onTaskComplete: _advanceTask,
+                        ),
+                      ),
+                    );
+                  },
                 ),
                 const SizedBox(height: 20),
-
-                // Levels Grid
-                GridView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: gridCrossAxis,
-                    crossAxisSpacing: 16,
-                    mainAxisSpacing: 16,
-                  ),
-                  itemCount: 20,
-                  itemBuilder: (context, index) {
-                    final levelIndex = index + 1;
-                    final isLocked = !unlockAllLevels && levelIndex > currentLevel;
-                    final isCompleted = levelIndex < currentLevel;
-                    final isCurrent = levelIndex == currentLevel;
-                    final levelColors = _badgeColors(levelIndex)
-                        .map(
-                          (c) => c.withOpacity(
-                            isLocked ? 0.08 : isCompleted ? 0.35 : 0.6,
-                          ),
-                        )
-                        .toList();
-
-                    return GestureDetector(
-                      onTap: () {
-                        if (!isLocked) {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => LevelTasksScreen(
-                                level: levelIndex,
-                                onTaskComplete: _advanceTask,
-                              ),
-                            ),
-                          );
-                        }
-                      },
-                      child: Container(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: levelColors,
-                          ),
-                          borderRadius: BorderRadius.circular(16),
-                          border: isCurrent
-                              ? Border.all(color: Colors.white, width: 2)
-                              : null,
-                          boxShadow: [
-                            if (isCurrent)
-                              BoxShadow(
-                                color: levelColors.last.withOpacity(0.4),
-                                blurRadius: 12,
-                                offset: const Offset(0, 6),
-                              ),
-                            if (!isCurrent)
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.08),
-                                blurRadius: 8,
-                                offset: const Offset(0, 4),
-                              ),
-                          ],
-                        ),
-                        child: Stack(
-                          children: [
-                            Positioned.fill(
-                              child: Center(
-                                child: FittedBox(
-                                  fit: BoxFit.contain,
-                                  child: Text(
-                                    '$levelIndex',
-                                    style: TextStyle(
-                                      fontSize: 140,
-                                      fontWeight: FontWeight.bold,
-                                      color: _levelWatermarkColor(levelIndex)
-                                          .withOpacity(isLocked ? 0.08 : 0.22),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            Center(
-                              child: isLocked
-                                  ? Icon(Icons.lock_rounded, color: Colors.white.withOpacity(0.5))
-                                  : isCompleted
-                                      ? const Icon(Icons.check_circle_rounded, color: Colors.white)
-                                      : Text(
-                                          '$levelIndex',
-                                          style: TextStyle(
-                                            fontSize: 20,
-                                            fontWeight: FontWeight.bold,
-                                            color: isCurrent
-                                                ? const Color(0xFF764ba2)
-                                                : Colors.white,
-                                          ),
-                                        ),
-                            ),
-                          ],
+                _SectionCard(
+                  title: 'Small talk expert',
+                  subtitle: 'Coming soon',
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => SectionsScreen(
+                          initialIndex: 1,
+                          gatedLevel: gatedLevel,
+                          unlockAllLevels: unlockAllLevels,
+                          onTaskComplete: _advanceTask,
                         ),
                       ),
                     );
@@ -1066,6 +970,343 @@ class _TaskRef {
   final int taskNumber;
 
   _TaskRef(this.level, this.taskNumber);
+}
+
+class _SectionCard extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  const _SectionCard({
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(22),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: Colors.white.withOpacity(0.2)),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white.withOpacity(0.8),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(
+              Icons.arrow_forward_rounded,
+              color: Colors.white.withOpacity(0.8),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class SectionsScreen extends StatefulWidget {
+  final int initialIndex;
+  final int gatedLevel;
+  final bool unlockAllLevels;
+  final void Function(int newLevel, int newTaskNumber)? onTaskComplete;
+
+  const SectionsScreen({
+    super.key,
+    required this.initialIndex,
+    required this.gatedLevel,
+    required this.unlockAllLevels,
+    required this.onTaskComplete,
+  });
+
+  @override
+  State<SectionsScreen> createState() => _SectionsScreenState();
+}
+
+class _SectionsScreenState extends State<SectionsScreen> {
+  late final PageController _controller;
+  int _index = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _index = widget.initialIndex.clamp(0, 1);
+    _controller = PageController(initialPage: _index);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _goTo(int index) {
+    if (index < 0 || index > 1) return;
+    _controller.animateToPage(
+      index,
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios_new),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Text(
+          _index == 0 ? 'Communication tips' : 'Small talk expert',
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.chevron_left_rounded),
+            onPressed: () => _goTo(_index - 1),
+          ),
+          IconButton(
+            icon: const Icon(Icons.chevron_right_rounded),
+            onPressed: () => _goTo(_index + 1),
+          ),
+        ],
+      ),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [kDeepBlue, kDeepPurple],
+          ),
+        ),
+        child: SafeArea(
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                child: Image.asset(
+                  'assets/images/title.png',
+                  height: 72,
+                  fit: BoxFit.contain,
+                ),
+              ),
+              Expanded(
+                child: PageView(
+                  controller: _controller,
+                  onPageChanged: (value) => setState(() => _index = value),
+                  children: [
+                    _CommunicationLevels(
+                      gatedLevel: widget.gatedLevel,
+                      unlockAllLevels: widget.unlockAllLevels,
+                      onTaskComplete: widget.onTaskComplete,
+                    ),
+                    const _SmallTalkPlaceholder(),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CommunicationLevels extends StatelessWidget {
+  final int gatedLevel;
+  final bool unlockAllLevels;
+  final void Function(int newLevel, int newTaskNumber)? onTaskComplete;
+
+  const _CommunicationLevels({
+    required this.gatedLevel,
+    required this.unlockAllLevels,
+    required this.onTaskComplete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final gridCrossAxis = screenWidth < 360 ? 3 : 4;
+    return Padding(
+      padding: const EdgeInsets.all(20),
+      child: GridView.builder(
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: gridCrossAxis,
+          crossAxisSpacing: 16,
+          mainAxisSpacing: 16,
+        ),
+        itemCount: 20,
+        itemBuilder: (context, index) {
+          final levelIndex = index + 1;
+          final isLocked = !unlockAllLevels && levelIndex > gatedLevel;
+          final isCompleted = levelIndex < gatedLevel;
+          final isCurrent = levelIndex == gatedLevel;
+
+          return GestureDetector(
+            onTap: () {
+              if (!isLocked) {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => LevelTasksScreen(
+                      level: levelIndex,
+                      onTaskComplete: onTaskComplete,
+                    ),
+                  ),
+                );
+              }
+            },
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(isLocked ? 0.05 : 0.12),
+                borderRadius: BorderRadius.circular(16),
+                border: isCurrent
+                    ? Border.all(color: Colors.white, width: 2)
+                    : Border.all(color: Colors.white.withOpacity(0.08)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.12),
+                    blurRadius: 10,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
+              ),
+              child: Stack(
+                children: [
+                  Center(
+                    child: Text(
+                      '$levelIndex',
+                      style: TextStyle(
+                        fontSize: 28,
+                        fontWeight: FontWeight.bold,
+                        color: isLocked
+                            ? Colors.white.withOpacity(0.35)
+                            : Colors.white,
+                      ),
+                    ),
+                  ),
+                  if (isCompleted)
+                    Positioned(
+                      right: 8,
+                      top: 8,
+                      child: Icon(
+                        Icons.check_circle_rounded,
+                        color: Colors.white.withOpacity(0.9),
+                        size: 18,
+                      ),
+                    ),
+                  if (isLocked)
+                    Center(
+                      child: Icon(
+                        Icons.lock_rounded,
+                        color: Colors.white.withOpacity(0.5),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _SmallTalkPlaceholder extends StatelessWidget {
+  const _SmallTalkPlaceholder();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Text(
+        'Small talk content coming soon.',
+        style: TextStyle(
+          color: Colors.white.withOpacity(0.8),
+          fontSize: 16,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+}
+
+class LevelBadgeSprite extends StatelessWidget {
+  final int level;
+  final double size;
+  final bool locked;
+  final bool dim;
+
+  const LevelBadgeSprite({
+    super.key,
+    required this.level,
+    required this.size,
+    this.locked = false,
+    this.dim = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final levelIndex = level.clamp(1, 20);
+    final fileName = 'level$levelIndex.png';
+    Widget image = Image.asset(
+      'assets/badges/$fileName',
+      width: size,
+      height: size,
+      fit: BoxFit.contain,
+    );
+
+    if (locked) {
+      image = ColorFiltered(
+        colorFilter: const ColorFilter.matrix([
+          0.2126, 0.7152, 0.0722, 0, 0,
+          0.2126, 0.7152, 0.0722, 0, 0,
+          0.2126, 0.7152, 0.0722, 0, 0,
+          0, 0, 0, 1, 0,
+        ]),
+        child: Opacity(opacity: 0.45, child: image),
+      );
+    } else if (dim) {
+      image = Opacity(opacity: 0.85, child: image);
+    }
+
+    return SizedBox(
+      width: size,
+      height: size,
+      child: image,
+    );
+  }
 }
 
 class _WeekdayLabel extends StatelessWidget {
@@ -1121,77 +1362,3 @@ class _DayCell extends StatelessWidget {
     );
   }
 }
-
-class _BadgePainter extends CustomPainter {
-  final double t;
-  final List<Color> colors;
-  final int tier;
-
-  _BadgePainter({
-    required this.t,
-    required this.colors,
-    required this.tier,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final r = size.width * 0.48;
-    final points = <Offset>[];
-    final spikes = 6 + (t * 10).round();
-    for (int i = 0; i < spikes * 2; i++) {
-      final angle = (math.pi * 2 * i) / (spikes * 2);
-      final wave = 0.68 + 0.26 * math.sin(i * 0.9 + t * math.pi * 2);
-      final radius = r * (i.isEven ? 1.0 : wave);
-      points.add(Offset(
-        center.dx + math.cos(angle) * radius,
-        center.dy + math.sin(angle) * radius,
-      ));
-    }
-
-    final path = Path()..addPolygon(points, true);
-    final gradient = RadialGradient(
-      colors: [colors.first, colors.last],
-      center: Alignment(-0.3 + 0.6 * t, -0.2),
-      radius: 0.9,
-    );
-
-    final paint = Paint()
-      ..shader = gradient.createShader(Rect.fromCircle(center: center, radius: r))
-      ..style = PaintingStyle.fill;
-    canvas.drawPath(path, paint);
-
-    final ringPaint = Paint()
-      ..color = Colors.white.withOpacity(0.7)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2;
-    for (int i = 0; i < tier; i++) {
-      final ringR = r * (0.62 - i * 0.08);
-      final sweep = math.pi * (1.2 + (i * 0.2)) + (t * math.pi * 0.6);
-      final rect = Rect.fromCircle(center: center, radius: ringR);
-      canvas.drawArc(rect, -math.pi / 2, sweep, false, ringPaint);
-    }
-
-    final corePaint = Paint()
-      ..color = Colors.white.withOpacity(0.9)
-      ..style = PaintingStyle.fill;
-    canvas.drawCircle(center, r * 0.22, corePaint);
-
-    final iconPaint = Paint()..color = Colors.white;
-    final diamond = Path()
-      ..moveTo(center.dx, center.dy - r * 0.3)
-      ..lineTo(center.dx + r * 0.2, center.dy)
-      ..lineTo(center.dx, center.dy + r * 0.3)
-      ..lineTo(center.dx - r * 0.2, center.dy)
-      ..close();
-    canvas.drawPath(diamond, iconPaint);
-  }
-
-  @override
-  bool shouldRepaint(covariant _BadgePainter oldDelegate) {
-    return oldDelegate.t != t || oldDelegate.colors != colors || oldDelegate.tier != tier;
-  }
-}
-
-
-

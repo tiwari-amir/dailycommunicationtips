@@ -19,6 +19,7 @@ class LevelTasksScreen extends StatefulWidget {
 
 class _LevelTasksScreenState extends State<LevelTasksScreen> {
   Set<String> completedTaskIds = {};
+  bool unlockAllLevels = false;
 
   @override
   void initState() {
@@ -28,8 +29,10 @@ class _LevelTasksScreenState extends State<LevelTasksScreen> {
 
   Future<void> _loadCompletedTasks() async {
     final ids = await StorageService.loadCompletedTaskIds();
+    final unlocked = await StorageService.getUnlockAll();
     setState(() {
       completedTaskIds = ids;
+      unlockAllLevels = unlocked;
     });
   }
 
@@ -118,6 +121,18 @@ class _LevelTasksScreenState extends State<LevelTasksScreen> {
     final tasks = allTasks.where((t) => t.level == widget.level).toList();
     final nextActive = _findNextIncompleteTask();
     final showCurrentTaskButton = nextActive != null;
+    final maxVisibleIndex = unlockAllLevels || nextActive == null
+        ? allTasks.length - 1
+        : allTasks.indexWhere(
+            (t) => t.level == nextActive.level && t.taskNumber == nextActive.taskNumber,
+          );
+    final visibleTasks = tasks.where((task) {
+      if (unlockAllLevels || nextActive == null) return true;
+      final taskIndex = allTasks.indexWhere(
+        (t) => t.level == task.level && t.taskNumber == task.taskNumber,
+      );
+      return taskIndex <= maxVisibleIndex;
+    }).toList();
 
     return Scaffold(
       extendBodyBehindAppBar: true,
@@ -145,7 +160,7 @@ class _LevelTasksScreenState extends State<LevelTasksScreen> {
         child: SafeArea(
           child: ListView.builder(
             padding: const EdgeInsets.all(20),
-            itemCount: tasks.length + (showCurrentTaskButton ? 1 : 0),
+            itemCount: visibleTasks.length + (showCurrentTaskButton ? 1 : 0),
             itemBuilder: (context, index) {
               if (showCurrentTaskButton && index == 0) {
                 return Container(
@@ -181,7 +196,7 @@ class _LevelTasksScreenState extends State<LevelTasksScreen> {
                 );
               }
               final taskIndex = showCurrentTaskButton ? index - 1 : index;
-              final task = tasks[taskIndex];
+              final task = visibleTasks[taskIndex];
               final isCompleted = completedTaskIds.contains(
                 StorageService.taskId(task.level, task.taskNumber),
               );
