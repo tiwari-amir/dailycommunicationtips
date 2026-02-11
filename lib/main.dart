@@ -5,7 +5,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz;
-import 'package:flutter_native_timezone/flutter_native_timezone.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:daily_communication_tips/screens/reading_screen.dart';
 import 'package:daily_communication_tips/data/course_tasks.dart';
 import 'package:daily_communication_tips/screens/level_tasks_screen.dart';
@@ -121,7 +121,7 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _initTimeZone() async {
     tz.initializeTimeZones();
     try {
-      final String timeZoneName = await FlutterNativeTimezone.getLocalTimezone();
+      final String timeZoneName = await FlutterTimezone.getLocalTimezone();
       tz.setLocalLocation(tz.getLocation(timeZoneName));
     } catch (e) {
       // Fallback to default/UTC if local timezone fails
@@ -252,7 +252,7 @@ class _HomeScreenState extends State<HomeScreen>
           body,
           scheduledDate,
           details,
-          androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+          androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
           uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
         );
       }
