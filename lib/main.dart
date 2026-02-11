@@ -58,9 +58,7 @@ class CommHelperApp extends StatelessWidget {
     return MaterialApp(
       navigatorKey: appNavigatorKey,
       title: 'Daily Communication Helper',
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-      ),
+      theme: ThemeData(primarySwatch: Colors.blue),
       home: HomeScreen(),
       debugShowCheckedModeBanner: false,
     );
@@ -72,7 +70,8 @@ class HomeScreen extends StatefulWidget {
   _HomeScreenState createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+class _HomeScreenState extends State<HomeScreen>
+    with SingleTickerProviderStateMixin {
   int currentLevel = 1;
   int currentTaskNumber = 1;
   int streak = 0;
@@ -210,7 +209,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 ListTile(
                   leading: const Icon(Icons.lock_open_rounded),
                   title: const Text('Unlock All Levels'),
-                  subtitle: const Text('Access any level without completing tasks'),
+                  subtitle: const Text(
+                    'Access any level without completing tasks',
+                  ),
                   onTap: () async {
                     Navigator.pop(context);
                     await _unlockAllLevels();
@@ -219,7 +220,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 ListTile(
                   leading: const Icon(Icons.refresh_rounded),
                   title: const Text('Reset All Progress'),
-                  subtitle: const Text('Factory reset: streaks, progress, and unlocks'),
+                  subtitle: const Text(
+                    'Factory reset: streaks, progress, and unlocks',
+                  ),
                   onTap: () async {
                     Navigator.pop(context);
                     await _resetAllProgress();
@@ -382,75 +385,44 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         final pulse = 0.98 + (_pulseController.value * 0.04);
         return Transform.scale(
           scale: pulse,
-          child: Container(
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.08),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.white.withOpacity(0.25)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.18),
-                  blurRadius: 14,
-                  offset: const Offset(0, 8),
-                ),
-              ],
-            ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              child: Row(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              const SizedBox(width: 2),
+              SizedBox(
+                height: 58,
+                width: 58,
+                child: LevelBadgeSprite(level: displayLevel, size: 58),
+              ),
+              const SizedBox(width: 8),
+              Column(
                 mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Colors.white.withOpacity(0.12),
-                      border: Border.all(color: Colors.white.withOpacity(0.35)),
-                    ),
-                    child: LevelBadgeSprite(
-                      level: displayLevel,
-                      size: 44,
+                  Text(
+                    unlockAllLevels
+                        ? 'Level $displayLevel'
+                        : 'Level $currentLevel',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.1,
+                      color: Colors.white,
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        unlockAllLevels ? 'Level $displayLevel' : 'Level $currentLevel',
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Current badge',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.white.withOpacity(0.8),
-                        ),
-                      ),
-                      if (unlockAllLevels)
-                        const Padding(
-                          padding: EdgeInsets.only(top: 2),
-                          child: Text(
-                            'MAX LEVEL REACHED',
-                            style: TextStyle(
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 1,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ),
-                    ],
+                  Text(
+                    'Current badge',
+                    style: TextStyle(
+                      fontSize: 8,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 0.15,
+                      color: Colors.white.withOpacity(0.78),
+                    ),
                   ),
                 ],
               ),
-            ),
+            ],
           ),
         );
       },
@@ -491,8 +463,16 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   Widget _buildMiniRing(int percent, String label, int sectionCount) {
-    final ringSize = sectionCount <= 2 ? 42.0 : sectionCount == 3 ? 36.0 : 32.0;
-    final fontSize = sectionCount <= 2 ? 11.0 : sectionCount == 3 ? 10.0 : 9.0;
+    final ringSize = sectionCount <= 2
+        ? 42.0
+        : sectionCount == 3
+        ? 36.0
+        : 32.0;
+    final fontSize = sectionCount <= 2
+        ? 11.0
+        : sectionCount == 3
+        ? 10.0
+        : 9.0;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
@@ -673,10 +653,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                         final dayKey =
                             '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${dayNum.toString().padLeft(2, '0')}';
                         final isDone = completedDates.contains(dayKey);
-                        return _DayCell(
-                          day: dayNum,
-                          isDone: isDone,
-                        );
+                        return _DayCell(day: dayNum, isDone: isDone);
                       }),
                     );
                   }),
@@ -716,11 +693,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     final communicationPercent = communicationTotal == 0
         ? 0
         : ((communicationCompleted / communicationTotal) * 100).round();
-    final smallTalkPercent =
-        smallTalkTotal == 0 ? 0 : ((smallTalkCompleted / smallTalkTotal) * 100).round();
+    final smallTalkPercent = smallTalkTotal == 0
+        ? 0
+        : ((smallTalkCompleted / smallTalkTotal) * 100).round();
     final communicationComplete =
         communicationTotal == 0 || communicationCompleted == communicationTotal;
-    final smallTalkComplete = smallTalkTotal == 0 || smallTalkCompleted == smallTalkTotal;
+    final smallTalkComplete =
+        smallTalkTotal == 0 || smallTalkCompleted == smallTalkTotal;
     final allSectionsComplete = communicationComplete && smallTalkComplete;
     final gatedLevel = unlockAllLevels || allSectionsComplete
         ? currentLevel
@@ -740,10 +719,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [
-              kDeepBlue,
-              kDeepPurple,
-            ],
+            colors: [kDeepBlue, kDeepPurple],
           ),
         ),
         child: SafeArea(
@@ -765,10 +741,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        Expanded(
+                        Flexible(
+                          fit: FlexFit.loose,
                           child: _buildLevelBadge(gatedLevel),
                         ),
-                        const SizedBox(width: 12),
+                        const Spacer(),
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -795,7 +772,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                                 borderRadius: BorderRadius.circular(16),
                               ),
                               child: IconButton(
-                                icon: const Icon(Icons.settings_rounded, color: Colors.white),
+                                icon: const Icon(
+                                  Icons.settings_rounded,
+                                  color: Colors.white,
+                                ),
                                 onPressed: _showSettingsSheet,
                               ),
                             ),
@@ -813,7 +793,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                   padding: const EdgeInsets.all(2),
                   decoration: BoxDecoration(
                     gradient: const LinearGradient(
-                      colors: [Color(0xFF7F7FD5), Color(0xFF86A8E7), Color(0xFF91EAE4)],
+                      colors: [
+                        Color(0xFF7F7FD5),
+                        Color(0xFF86A8E7),
+                        Color(0xFF91EAE4),
+                      ],
                     ),
                     borderRadius: BorderRadius.circular(26),
                     boxShadow: [
@@ -841,11 +825,17 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                               child: Column(
                                 children: [
                                   TweenAnimationBuilder<double>(
-                                    tween: Tween<double>(begin: 0, end: overallProgress),
+                                    tween: Tween<double>(
+                                      begin: 0,
+                                      end: overallProgress,
+                                    ),
                                     duration: const Duration(milliseconds: 900),
                                     curve: Curves.easeOutCubic,
                                     builder: (context, value, child) {
-                                      return _buildProgressRing(value, overallPercent);
+                                      return _buildProgressRing(
+                                        value,
+                                        overallPercent,
+                                      );
                                     },
                                   ),
                                   const SizedBox(height: 12),
@@ -854,12 +844,18 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                                     child: ElevatedButton(
                                       onPressed: _startTask,
                                       style: ElevatedButton.styleFrom(
-                                        backgroundColor: const Color(0xFF5F67FF),
+                                        backgroundColor: const Color(
+                                          0xFF5F67FF,
+                                        ),
                                         foregroundColor: Colors.white,
                                         elevation: 3,
-                                        padding: const EdgeInsets.symmetric(horizontal: 18),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 18,
+                                        ),
                                         shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(14),
+                                          borderRadius: BorderRadius.circular(
+                                            14,
+                                          ),
                                         ),
                                       ),
                                       child: const Text(
@@ -903,8 +899,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                                   allSectionsComplete
                                       ? 'Course complete. You finished all 20 levels.'
                                       : nextActive == null
-                                          ? 'Complete other sections to reach Level 20.'
-                                          : 'Next up: Level ${nextActive.level} Task ${nextActive.taskNumber}',
+                                      ? 'Complete other sections to reach Level 20.'
+                                      : 'Next up: Level ${nextActive.level} Task ${nextActive.taskNumber}',
                                   style: TextStyle(
                                     fontSize: 12,
                                     fontWeight: FontWeight.w600,
@@ -1115,7 +1111,10 @@ class _SectionsScreenState extends State<SectionsScreen> {
           child: Column(
             children: [
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 4,
+                ),
                 child: Image.asset(
                   'assets/images/title.png',
                   height: 72,
@@ -1290,10 +1289,26 @@ class LevelBadgeSprite extends StatelessWidget {
     if (locked) {
       image = ColorFiltered(
         colorFilter: const ColorFilter.matrix([
-          0.2126, 0.7152, 0.0722, 0, 0,
-          0.2126, 0.7152, 0.0722, 0, 0,
-          0.2126, 0.7152, 0.0722, 0, 0,
-          0, 0, 0, 1, 0,
+          0.2126,
+          0.7152,
+          0.0722,
+          0,
+          0,
+          0.2126,
+          0.7152,
+          0.0722,
+          0,
+          0,
+          0.2126,
+          0.7152,
+          0.0722,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
         ]),
         child: Opacity(opacity: 0.45, child: image),
       );
@@ -1301,11 +1316,7 @@ class LevelBadgeSprite extends StatelessWidget {
       image = Opacity(opacity: 0.85, child: image);
     }
 
-    return SizedBox(
-      width: size,
-      height: size,
-      child: image,
-    );
+    return SizedBox(width: size, height: size, child: image);
   }
 }
 
@@ -1318,10 +1329,7 @@ class _WeekdayLabel extends StatelessWidget {
     return SizedBox(
       width: 32,
       child: Center(
-        child: Text(
-          label,
-          style: const TextStyle(fontWeight: FontWeight.w600),
-        ),
+        child: Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
       ),
     );
   }
@@ -1342,7 +1350,9 @@ class _DayCell extends StatelessWidget {
           ? const SizedBox.shrink()
           : Container(
               decoration: BoxDecoration(
-                color: isDone ? kAccentPrimary.withOpacity(0.8) : Colors.transparent,
+                color: isDone
+                    ? kAccentPrimary.withOpacity(0.8)
+                    : Colors.transparent,
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(
                   color: isDone ? kAccentPrimary : Colors.black12,
