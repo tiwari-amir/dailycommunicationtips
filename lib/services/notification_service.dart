@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:daily_communication_tips/data/course_tasks.dart';
 import 'package:daily_communication_tips/services/storage_service.dart';
 import 'package:flutter/material.dart';
@@ -17,6 +15,24 @@ class NotificationService {
   static const String _channelDescription =
       'Reminders to complete daily communication tasks.';
 
+  static const int _dailyReminderId = 1001;
+  static const int _streakReminderId = 1002;
+  static const String openTaskActionId = 'open_task';
+  static const String markDoneActionId = 'mark_done';
+
+  static const List<String> _encouragingBodies = [
+    'Today\'s 2-minute communication tip is ready.',
+    'A quick conversation boost is waiting for you.',
+    'One small practice today, stronger conversations tomorrow.',
+    'Take 2 minutes for today\'s communication task.',
+    'Your daily tip is ready when you are.',
+    'Keep your streak gentle and steady. Today\'s tip is live.',
+    'Ready for today\'s mini communication challenge?',
+    'A calm 2-minute task to sharpen your communication skills.',
+    'Show up for today\'s tip. You\'re building real confidence.',
+    'Today\'s task is open. Tap to continue your progress.',
+  ];
+
   static void Function(NotificationResponse response)? _onNotificationResponse;
 
   static void setNotificationTapHandler(
@@ -27,7 +43,7 @@ class NotificationService {
 
   static Future<void> initialize() async {
     tz.initializeTimeZones();
-    final String timezone = await FlutterNativeTimezone.getLocalTimezone();
+    final timezone = await FlutterNativeTimezone.getLocalTimezone();
     tz.setLocalLocation(tz.getLocation(timezone));
 
     const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
@@ -45,25 +61,37 @@ class NotificationService {
   }
 
   static Future<void> requestPermissions() async {
-    final android = _plugin.resolvePlatformSpecificImplementation<
-        AndroidFlutterLocalNotificationsPlugin>();
+    final android = _plugin
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
     await android?.requestNotificationsPermission();
 
-    final ios =
-        _plugin.resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>();
+    final ios = _plugin
+        .resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin
+        >();
     await ios?.requestPermissions(alert: true, badge: true, sound: true);
   }
 
-  static Future<void> scheduleDailyReminder({
-    required TimeOfDay time,
-  }) async {
+  static Future<void> scheduleDailyReminder({required TimeOfDay time}) async {
+    await StorageService.resetDailyNotificationFlagsIfNeeded();
     final message = await _buildDailyMessage();
+    final pinEnabled = await StorageService.getPinTodayTaskInPanel();
+
+    await _plugin.cancel(_dailyReminderId);
     await _plugin.zonedSchedule(
-      1001,
+      _dailyReminderId,
       message.title,
       message.body,
       _nextInstanceOfTime(time),
-      _details(hasOpenAction: message.hasAction),
+      _details(
+        hasOpenAction: message.hasAction,
+        hasMarkDoneAction: message.hasMarkDoneAction,
+        pinned: pinEnabled,
+        expandedText: message.expandedText,
+        timeoutAfterMs: pinEnabled ? _timeoutUntilEndOfDay() : null,
+      ),
       androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
       uiLocalNotificationDateInterpretation:
           UILocalNotificationDateInterpretation.absoluteTime,
@@ -72,41 +100,57 @@ class NotificationService {
     );
   }
 
-  static Future<void> scheduleStreakReminder({
-    required TimeOfDay time,
-  }) async {
-    final streak = await StorageService.getStreak();
-    if (streak < 1) {
+  static Future<void> syncPinnedNotificationState() async {
+    await StorageService.resetDailyNotificationFlagsIfNeeded();
+    final pinEnabled = await StorageService.getPinTodayTaskInPanel();
+    if (!pinEnabled) return;
+
+    final done = await StorageService.isTodayTaskDone();
+    if (done) {
+      await _plugin.cancel(_dailyReminderId);
+      await scheduleDailyReminder(time: const TimeOfDay(hour: 8, minute: 0));
       return;
     }
-    final lastCompleted = await StorageService.getLastCompletedDate();
-    if (lastCompleted == null) return;
-    final hours = DateTime.now().difference(lastCompleted).inHours;
-    if (hours < 48) {
-      return;
-    }
-    const title = 'Keep your streak alive';
-    const body = 'Hurry up - your streak is about to end.';
-    await _plugin.zonedSchedule(
-      1002,
-      title,
-      body,
-      _nextInstanceOfTime(time),
-      _details(hasOpenAction: false),
-      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-      matchDateTimeComponents: DateTimeComponents.time,
+
+    final message = await _buildDailyMessage();
+    await _plugin.show(
+      _dailyReminderId,
+      message.title,
+      message.body,
+      _details(
+        hasOpenAction: message.hasAction,
+        hasMarkDoneAction: message.hasMarkDoneAction,
+        pinned: true,
+        expandedText: message.expandedText,
+        timeoutAfterMs: _timeoutUntilEndOfDay(),
+      ),
+      payload: message.payload,
     );
+  }
+
+  static Future<void> handleMarkDoneAction() async {
+    await StorageService.markTodayTaskDone();
+    await _plugin.cancel(_dailyReminderId);
+    await scheduleDailyReminder(time: const TimeOfDay(hour: 8, minute: 0));
+  }
+
+  static Future<void> scheduleStreakReminder({required TimeOfDay time}) async {
+    await _plugin.cancel(_streakReminderId);
   }
 
   static Future<void> showTestDailyNow() async {
     final message = await _safeBuildDailyMessage();
+    final pinEnabled = await StorageService.getPinTodayTaskInPanel();
     await _plugin.show(
       3001,
       message.title,
       message.body,
-      _details(hasOpenAction: message.hasAction),
+      _details(
+        hasOpenAction: message.hasAction,
+        hasMarkDoneAction: message.hasMarkDoneAction,
+        pinned: pinEnabled,
+        expandedText: message.expandedText,
+      ),
       payload: message.payload,
     );
   }
@@ -114,9 +158,14 @@ class NotificationService {
   static Future<void> showTestStreakNow() async {
     await _plugin.show(
       3002,
-      'Keep your streak alive',
-      'Hurry up - your streak is about to end.',
-      _details(hasOpenAction: false),
+      'Gentle streak check',
+      'You can keep momentum with today\'s quick tip.',
+      _details(
+        hasOpenAction: false,
+        hasMarkDoneAction: false,
+        pinned: false,
+        expandedText: 'Estimated time: 2 min',
+      ),
     );
   }
 
@@ -126,10 +175,41 @@ class NotificationService {
     final body = streak == 7
         ? 'Congratulations on your 7-day streak!'
         : 'Nice work! You are on a $streak-day streak.';
-    await _plugin.show(2001, title, body, _details(hasOpenAction: false));
+    await _plugin.show(
+      2001,
+      title,
+      body,
+      _details(
+        hasOpenAction: false,
+        hasMarkDoneAction: false,
+        pinned: false,
+        expandedText: body,
+      ),
+    );
   }
 
-  static NotificationDetails _details({required bool hasOpenAction}) {
+  static NotificationDetails _details({
+    required bool hasOpenAction,
+    required bool hasMarkDoneAction,
+    required bool pinned,
+    required String expandedText,
+    int? timeoutAfterMs,
+  }) {
+    final actions = <AndroidNotificationAction>[
+      if (hasOpenAction)
+        const AndroidNotificationAction(
+          openTaskActionId,
+          'Start Today\'s Task',
+          showsUserInterface: true,
+        ),
+      if (hasMarkDoneAction)
+        const AndroidNotificationAction(
+          markDoneActionId,
+          'Mark as Done',
+          showsUserInterface: true,
+        ),
+    ];
+
     return NotificationDetails(
       android: AndroidNotificationDetails(
         _channelId,
@@ -139,46 +219,38 @@ class NotificationService {
         priority: Priority.high,
         enableVibration: true,
         category: AndroidNotificationCategory.reminder,
-        actions: hasOpenAction
-            ? [
-                const AndroidNotificationAction(
-                  'open_task',
-                  'Open Task',
-                  showsUserInterface: true,
-                )
-              ]
-            : null,
+        styleInformation: BigTextStyleInformation(
+          expandedText,
+          contentTitle: 'Today\'s communication task',
+          summaryText: 'Estimated time: 2 min',
+        ),
+        actions: actions.isEmpty ? null : actions,
+        ongoing: pinned,
+        autoCancel: !pinned,
+        onlyAlertOnce: true,
+        timeoutAfter: timeoutAfterMs,
       ),
       iOS: const DarwinNotificationDetails(),
     );
   }
 
   static Future<_DailyMessage> _buildDailyMessage() async {
-    final completed = await StorageService.loadCompletedTaskIds();
-    DailyTask? nextTask;
-    for (final task in allTasks) {
-      final id = StorageService.taskId(task.level, task.taskNumber);
-      if (!completed.contains(id)) {
-        nextTask = task;
-        break;
-      }
-    }
+    final nextTask = await _nextTaskForDeepLink();
+    final done = await StorageService.isTodayTaskDone();
+    final opened = await StorageService.isTodayTaskOpened();
 
-    if (nextTask == null) {
-      final random = allTasks[math.Random().nextInt(allTasks.length)];
-      return _DailyMessage(
-        title: 'Daily tip',
-        body: _truncate(random.content),
-        payload: 'random',
-        hasAction: false,
-      );
-    }
+    final taskTitle = 'Level ${nextTask.level} - Task ${nextTask.taskNumber}';
+    final preview = _truncate(nextTask.content, max: 170);
+    final expandedText = '$taskTitle\n$preview';
+    final body = await _pickDailyBody(done: done, opened: opened);
 
     return _DailyMessage(
-      title: 'Today\'s tip - Level ${nextTask.level}, Task ${nextTask.taskNumber}',
-      body: _truncate(nextTask.content),
+      title: 'Today\'s communication task',
+      body: body,
+      expandedText: expandedText,
       payload: 'task:${nextTask.level}:${nextTask.taskNumber}',
       hasAction: true,
+      hasMarkDoneAction: opened && !done,
     );
   }
 
@@ -187,18 +259,57 @@ class NotificationService {
       return await _buildDailyMessage();
     } catch (_) {
       return _DailyMessage(
-        title: 'Daily tip',
-        body: 'Check in and complete today\'s task.',
-        payload: 'random',
-        hasAction: false,
+        title: 'Today\'s communication task',
+        body: '2 min practice for clearer conversations - Today 0/1',
+        expandedText:
+            'Level 1 - Task 1\nA short communication practice is ready.',
+        payload: 'task:1:1',
+        hasAction: true,
+        hasMarkDoneAction: false,
       );
     }
   }
 
-  static String _truncate(String text) {
-    const max = 120;
+  static Future<DailyTask> _nextTaskForDeepLink() async {
+    final completed = await StorageService.loadCompletedTaskIds();
+    for (final task in allTasks) {
+      final id = StorageService.taskId(task.level, task.taskNumber);
+      if (!completed.contains(id)) {
+        return task;
+      }
+    }
+    return allTasks.last;
+  }
+
+  static Future<String> _pickDailyBody({
+    required bool done,
+    required bool opened,
+  }) async {
+    if (done) return 'Completed for today - calm progress, well done.';
+    if (opened) return 'In progress - return when you are ready.';
+
+    final streak = await StorageService.getStreak();
+    final now = DateTime.now();
+    final daySeed = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).difference(DateTime(now.year, 1, 1)).inDays;
+    final index = (daySeed + (streak * 3)) % _encouragingBodies.length;
+    final micro = _truncate(_encouragingBodies[index], max: 64);
+    return '$micro - Today 0/1';
+  }
+
+  static String _truncate(String text, {int max = 120}) {
     if (text.length <= max) return text;
-    return '${text.substring(0, max - 1)}…';
+    return '${text.substring(0, max - 3)}...';
+  }
+
+  static int _timeoutUntilEndOfDay() {
+    final now = DateTime.now();
+    final end = DateTime(now.year, now.month, now.day, 23, 59, 59);
+    final millis = end.difference(now).inMilliseconds;
+    return millis < 1000 ? 1000 : millis;
   }
 
   static tz.TZDateTime _nextInstanceOfTime(TimeOfDay time) {
@@ -221,14 +332,17 @@ class NotificationService {
 class _DailyMessage {
   final String title;
   final String body;
+  final String expandedText;
   final String payload;
   final bool hasAction;
+  final bool hasMarkDoneAction;
 
   _DailyMessage({
     required this.title,
     required this.body,
+    required this.expandedText,
     required this.payload,
     required this.hasAction,
+    required this.hasMarkDoneAction,
   });
 }
-

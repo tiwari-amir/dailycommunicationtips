@@ -2,56 +2,73 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class StorageService {
   static const String streakKey = 'streak';
+  static const String bestStreakKey = 'bestStreak';
   static const String lastDateKey = 'lastCompletedDate';
   static const String levelKey = 'level';
   static const String tasksKey = 'tasksCompleted';
   static const String completedTaskIdsKey = 'completedTaskIds';
   static const String unlockAllKey = 'unlockAll';
   static const String completedDatesKey = 'completedDates';
+  static const String pinTodayTaskInPanelKey = 'pinTodayTaskInPanel';
+  static const String todayTaskOpenedKey = 'todayTaskOpened';
+  static const String todayTaskDoneKey = 'todayTaskDone';
+  static const String todayTaskDateKey = 'todayTaskDate';
 
   static Future<int> updateStreak() async {
     final prefs = await SharedPreferences.getInstance();
     int streak = prefs.getInt(streakKey) ?? 0;
+    int bestStreak = prefs.getInt(bestStreakKey) ?? 0;
     String? lastDateString = prefs.getString(lastDateKey);
-    DateTime now = DateTime.now();
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
 
     if (lastDateString == null) {
       streak = 1;
       await prefs.setInt(streakKey, streak);
       await prefs.setString(lastDateKey, now.toIso8601String());
     } else {
-      DateTime lastDate = DateTime.parse(lastDateString);
-      int hoursDiff = now.difference(lastDate).inHours;
+      final lastDate = DateTime.parse(lastDateString);
+      final lastDay = DateTime(lastDate.year, lastDate.month, lastDate.day);
+      final dayDiff = today.difference(lastDay).inDays;
 
-      if (hoursDiff >= 48) {
-        // Streak lost (more than 48 hours passed)
-        streak = 1;
-        await prefs.setInt(streakKey, streak);
-        await prefs.setString(lastDateKey, now.toIso8601String());
-      } else if (hoursDiff >= 24) {
-        // Streak increment (between 24 and 48 hours)
+      if (dayDiff == 0) {
+        return streak;
+      } else if (dayDiff == 1) {
         streak++;
         await prefs.setInt(streakKey, streak);
         await prefs.setString(lastDateKey, now.toIso8601String());
+      } else {
+        streak = 1;
+        await prefs.setInt(streakKey, streak);
+        await prefs.setString(lastDateKey, now.toIso8601String());
       }
-      // If < 24 hours, do nothing (maintain streak, don't update time)
+    }
+    if (streak > bestStreak) {
+      await prefs.setInt(bestStreakKey, streak);
     }
     return streak;
   }
 
   static Future<int> getStreak() async {
     final prefs = await SharedPreferences.getInstance();
-    int streak = prefs.getInt(streakKey) ?? 0;
+    final streak = prefs.getInt(streakKey) ?? 0;
     String? lastDateString = prefs.getString(lastDateKey);
-    
+
     if (lastDateString != null) {
-      DateTime lastDate = DateTime.parse(lastDateString);
-      // If more than 48 hours have passed, show 0 (streak lost)
-      if (DateTime.now().difference(lastDate).inHours >= 48) {
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      final lastDate = DateTime.parse(lastDateString);
+      final lastDay = DateTime(lastDate.year, lastDate.month, lastDate.day);
+      if (today.difference(lastDay).inDays > 1) {
         return 0;
       }
     }
     return streak;
+  }
+
+  static Future<int> getBestStreak() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(bestStreakKey) ?? 0;
   }
 
   static Future<void> saveLevelXP(int level, int xp) async {
@@ -143,14 +160,60 @@ class StorageService {
     return prefs.getBool(unlockAllKey) ?? false;
   }
 
+  static Future<void> setPinTodayTaskInPanel(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(pinTodayTaskInPanelKey, value);
+  }
+
+  static Future<bool> getPinTodayTaskInPanel() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(pinTodayTaskInPanelKey) ?? false;
+  }
+
+  static Future<void> resetDailyNotificationFlagsIfNeeded() async {
+    final prefs = await SharedPreferences.getInstance();
+    final today = _dateKey(DateTime.now());
+    final savedDate = prefs.getString(todayTaskDateKey);
+    if (savedDate == today) return;
+    await prefs.setString(todayTaskDateKey, today);
+    await prefs.setBool(todayTaskOpenedKey, false);
+    await prefs.setBool(todayTaskDoneKey, false);
+  }
+
+  static Future<void> markTodayTaskOpened() async {
+    await resetDailyNotificationFlagsIfNeeded();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(todayTaskOpenedKey, true);
+  }
+
+  static Future<void> markTodayTaskDone() async {
+    await resetDailyNotificationFlagsIfNeeded();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(todayTaskDoneKey, true);
+  }
+
+  static Future<bool> isTodayTaskOpened() async {
+    await resetDailyNotificationFlagsIfNeeded();
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(todayTaskOpenedKey) ?? false;
+  }
+
+  static Future<bool> isTodayTaskDone() async {
+    await resetDailyNotificationFlagsIfNeeded();
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(todayTaskDoneKey) ?? false;
+  }
+
   static Future<void> resetAllProgress() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(streakKey);
-    await prefs.remove(lastDateKey);
     await prefs.remove(levelKey);
     await prefs.remove(tasksKey);
     await prefs.remove(completedTaskIdsKey);
     await prefs.remove(completedDatesKey);
     await prefs.remove(unlockAllKey);
+    await prefs.remove(pinTodayTaskInPanelKey);
+    await prefs.remove(todayTaskOpenedKey);
+    await prefs.remove(todayTaskDoneKey);
+    await prefs.remove(todayTaskDateKey);
   }
 }

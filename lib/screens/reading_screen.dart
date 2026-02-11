@@ -1,19 +1,25 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:daily_communication_tips/data/course_tasks.dart';
+import '../services/gamification_service.dart';
 import '../services/storage_service.dart';
 import '../services/notification_service.dart';
+import '../theme/app_colors.dart';
 
 class ReadingScreen extends StatefulWidget {
   final int currentLevel;
   final int currentTaskNumber;
   final void Function(int newLevel, int newTaskNumber)? onTaskComplete;
+  final bool openedFromCompletedTask;
 
   const ReadingScreen({
     super.key,
     required this.currentLevel,
     required this.currentTaskNumber,
     this.onTaskComplete,
+    this.openedFromCompletedTask = false,
   });
 
   @override
@@ -25,6 +31,8 @@ class _ReadingScreenState extends State<ReadingScreen> {
   late int taskNumber;
   late DailyTask currentTask;
   bool isCompleted = false;
+  bool unlockAllLevels = false;
+  bool _allowActivePrompt = false;
   Set<String> completedTaskIds = {};
   static const Duration _completeCooldown = Duration(seconds: 5);
   Duration _cooldownLeft = _completeCooldown;
@@ -35,6 +43,9 @@ class _ReadingScreenState extends State<ReadingScreen> {
     super.initState();
     level = widget.currentLevel;
     taskNumber = widget.currentTaskNumber;
+    _allowActivePrompt = widget.openedFromCompletedTask;
+    StorageService.markTodayTaskOpened();
+    NotificationService.syncPinnedNotificationState();
     _loadTask();
     _loadCompletionState();
     _startCooldown();
@@ -69,8 +80,10 @@ class _ReadingScreenState extends State<ReadingScreen> {
 
   Future<void> _loadCompletionState() async {
     final ids = await StorageService.loadCompletedTaskIds();
+    final unlocked = await StorageService.getUnlockAll();
     setState(() {
       completedTaskIds = ids;
+      unlockAllLevels = unlocked;
       isCompleted = ids.contains(StorageService.taskId(level, taskNumber));
     });
   }
@@ -78,6 +91,7 @@ class _ReadingScreenState extends State<ReadingScreen> {
   Future<void> _completeTask() async {
     if (isCompleted || _cooldownLeft > Duration.zero) return;
 
+    final previousLevel = level;
     int nextTaskNumber = taskNumber + 1;
     int nextLevel = level;
 
@@ -109,17 +123,38 @@ class _ReadingScreenState extends State<ReadingScreen> {
 
     // Update streak based on time rules
     final newStreak = await StorageService.updateStreak();
+    
+    // Calculate Freeze Rewards
+    int freezesEarned = 0;
+    if (newStreak == 4) {
+      freezesEarned = 2;
+    } else if (newStreak == 10) {
+      freezesEarned = 2;
+    } else if (newStreak > 10 && (newStreak - 10) % 10 == 0) {
+      freezesEarned = 1;
+    }
+
+    if (freezesEarned > 0) {
+      await _addFreezes(freezesEarned);
+      if (mounted) _showFreezeRewardAnimation(freezesEarned);
+    }
+
     if (newStreak == 7 || newStreak % 7 == 0) {
       await NotificationService.showStreakCongrats(newStreak);
     }
     await NotificationService.scheduleDailyReminder(
-      time: const TimeOfDay(hour: 7, minute: 0),
-    );
-    await NotificationService.scheduleStreakReminder(
-      time: const TimeOfDay(hour: 21, minute: 0),
+      time: const TimeOfDay(hour: 8, minute: 0),
     );
     await StorageService.markTaskCompleted(level, taskNumber);
     await StorageService.markCompletionDate(DateTime.now());
+    await StorageService.markTodayTaskDone();
+
+    // Cancel streak expiry notifications
+    final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+    for (int id in [1001, 1002, 1003, 1004]) {
+      await flutterLocalNotificationsPlugin.cancel(id);
+    }
+    await NotificationService.syncPinnedNotificationState();
 
     // Notify parent
     completedTaskIds.add(StorageService.taskId(level, taskNumber));
@@ -132,6 +167,74 @@ class _ReadingScreenState extends State<ReadingScreen> {
     setState(() {
       isCompleted = true;
     });
+
+    // Subtle, meaningful milestone feedback when a new badge tier is reached.
+    if (GamificationService.unlockedNewBadge(
+      previousLevel: previousLevel,
+      nextLevel: nextLevel,
+    )) {
+      final badgeName = GamificationService.currentBadgeName(nextLevel);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 2),
+            content: Text('New badge unlocked: $badgeName'),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _addFreezes(int amount) async {
+    final prefs = await SharedPreferences.getInstance();
+    final current = prefs.getInt('freeze_count') ?? 3;
+    await prefs.setInt('freeze_count', current + amount);
+  }
+
+  void _showFreezeRewardAnimation(int amount) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0.0, end: 1.0),
+          duration: const Duration(milliseconds: 800),
+          curve: Curves.elasticOut,
+          builder: (context, value, child) {
+            return Transform.scale(
+              scale: value,
+              child: AlertDialog(
+                backgroundColor: AppColors.bgCard,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.ac_unit_rounded, color: Colors.blue, size: 48),
+                    const SizedBox(height: 16),
+                    Text(
+                      '+$amount Freezes Earned!',
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text('Keep up the great work!', style: TextStyle(color: Colors.white70)),
+                    const SizedBox(height: 16),
+                    ElevatedButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('Awesome'),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   bool get _hasNextTask {
@@ -141,7 +244,40 @@ class _ReadingScreenState extends State<ReadingScreen> {
     return true;
   }
 
+  _TaskRef? _nextSequentialTask(int fromLevel, int fromTaskNumber) {
+    final currentIndex = allTasks.indexWhere(
+      (t) => t.level == fromLevel && t.taskNumber == fromTaskNumber,
+    );
+    if (currentIndex < 0 || currentIndex + 1 >= allTasks.length) return null;
+    final next = allTasks[currentIndex + 1];
+    return _TaskRef(next.level, next.taskNumber);
+  }
+
+  bool get _isViewingActiveTask {
+    final active = _findNextIncompleteTask();
+    if (active == null) return false;
+    return active.level == level && active.taskNumber == taskNumber;
+  }
+
+  bool get _canGoToNextTask {
+    if (!_hasNextTask) return false;
+    if (unlockAllLevels) return true;
+    if (_isViewingActiveTask) return false;
+    final next = _nextSequentialTask(level, taskNumber);
+    if (next == null) return false;
+    return completedTaskIds.contains(
+      StorageService.taskId(next.level, next.taskNumber),
+    );
+  }
+
+  bool get _showGoToActivePrompt {
+    final active = _findNextIncompleteTask();
+    if (active == null) return false;
+    return _allowActivePrompt && isCompleted && !_isViewingActiveTask;
+  }
+
   void _goToNextTask() {
+    if (!_canGoToNextTask) return;
     int nextTaskNumber = taskNumber + 1;
     int nextLevel = level;
 
@@ -157,8 +293,11 @@ class _ReadingScreenState extends State<ReadingScreen> {
     setState(() {
       level = nextLevel;
       taskNumber = nextTaskNumber;
+      _allowActivePrompt = false;
       _loadTask();
-      isCompleted = completedTaskIds.contains(StorageService.taskId(level, taskNumber));
+      isCompleted = completedTaskIds.contains(
+        StorageService.taskId(level, taskNumber),
+      );
     });
     _startCooldown();
   }
@@ -169,8 +308,11 @@ class _ReadingScreenState extends State<ReadingScreen> {
     setState(() {
       level = nextActive.level;
       taskNumber = nextActive.taskNumber;
+      _allowActivePrompt = false;
       _loadTask();
-      isCompleted = completedTaskIds.contains(StorageService.taskId(level, taskNumber));
+      isCompleted = completedTaskIds.contains(
+        StorageService.taskId(level, taskNumber),
+      );
     });
     _startCooldown();
   }
@@ -191,28 +333,30 @@ class _ReadingScreenState extends State<ReadingScreen> {
     return null;
   }
 
-  bool get _hasCurrentActiveTask {
-    return _findNextIncompleteTask() != null;
-  }
-
   @override
   Widget build(BuildContext context) {
-    final cooldownProgress = 1 -
-        (_cooldownLeft.inMilliseconds / _completeCooldown.inMilliseconds)
-            .clamp(0.0, 1.0);
+    final cooldownProgress =
+        1 -
+        (_cooldownLeft.inMilliseconds / _completeCooldown.inMilliseconds).clamp(
+          0.0,
+          1.0,
+        );
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: Text('Level $level • Task $taskNumber'),
+        title: const Text(
+          'Reading Task',
+          style: TextStyle(color: AppColors.textPrimary),
+        ),
       ),
       body: Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [Color(0xFF667eea), Color(0xFF764ba2)],
+            colors: [AppColors.bgBase, AppColors.bgElevated],
           ),
         ),
         child: SafeArea(
@@ -228,9 +372,8 @@ class _ReadingScreenState extends State<ReadingScreen> {
                       decoration: BoxDecoration(
                         gradient: const LinearGradient(
                           colors: [
-                            Color(0xFF7F7FD5),
-                            Color(0xFF86A8E7),
-                            Color(0xFF91EAE4),
+                            AppColors.accentPrimary,
+                            AppColors.accentFocus,
                           ],
                         ),
                         borderRadius: BorderRadius.circular(24),
@@ -245,9 +388,9 @@ class _ReadingScreenState extends State<ReadingScreen> {
                       child: Container(
                         padding: const EdgeInsets.all(22),
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.92),
+                          color: AppColors.bgCard,
                           borderRadius: BorderRadius.circular(22),
-                          border: Border.all(color: Colors.white.withOpacity(0.6)),
+                          border: Border.all(color: AppColors.progressTrack),
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -260,14 +403,14 @@ class _ReadingScreenState extends State<ReadingScreen> {
                                     vertical: 6,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF764ba2).withOpacity(0.1),
+                                    color: AppColors.bgElevated,
                                     borderRadius: BorderRadius.circular(16),
                                   ),
                                   child: Text(
                                     'Level $level',
                                     style: const TextStyle(
                                       fontWeight: FontWeight.bold,
-                                      color: Color(0xFF764ba2),
+                                      color: AppColors.textSecondary,
                                     ),
                                   ),
                                 ),
@@ -278,14 +421,14 @@ class _ReadingScreenState extends State<ReadingScreen> {
                                     vertical: 6,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF667eea).withOpacity(0.1),
+                                    color: AppColors.bgElevated,
                                     borderRadius: BorderRadius.circular(16),
                                   ),
                                   child: Text(
                                     'Task $taskNumber',
                                     style: const TextStyle(
                                       fontWeight: FontWeight.bold,
-                                      color: Color(0xFF667eea),
+                                      color: AppColors.textSecondary,
                                     ),
                                   ),
                                 ),
@@ -296,7 +439,7 @@ class _ReadingScreenState extends State<ReadingScreen> {
                               currentTask.content,
                               style: const TextStyle(
                                 fontSize: 18,
-                                color: Color(0xFF2D3142),
+                                color: AppColors.textPrimary,
                                 height: 1.5,
                               ),
                             ),
@@ -318,22 +461,27 @@ class _ReadingScreenState extends State<ReadingScreen> {
                           borderRadius: BorderRadius.circular(16),
                           child: LinearProgressIndicator(
                             value: cooldownProgress,
-                            backgroundColor: Colors.white.withOpacity(0.15),
+                            backgroundColor: AppColors.progressTrack,
                             valueColor: AlwaysStoppedAnimation<Color>(
-                              isCompleted ? Colors.green : const Color(0xFF5F67FF),
+                              isCompleted
+                                  ? AppColors.progressGood
+                                  : AppColors.accentPrimary,
                             ),
                           ),
                         ),
                       ),
                       ElevatedButton(
                         onPressed:
-                            (isCompleted || _cooldownLeft > Duration.zero) ? null : _completeTask,
+                            (isCompleted || _cooldownLeft > Duration.zero)
+                            ? null
+                            : _completeTask,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor:
-                              isCompleted ? Colors.green : const Color(0xFF5F67FF),
-                          foregroundColor: Colors.white,
+                          backgroundColor: isCompleted
+                              ? AppColors.progressGood
+                              : AppColors.accentPrimary,
+                          foregroundColor: AppColors.textPrimary,
                           elevation: 6,
-                          shadowColor: const Color(0xFF5F67FF).withOpacity(0.4),
+                          shadowColor: AppColors.accentPrimary.withOpacity(0.4),
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16),
                           ),
@@ -349,8 +497,8 @@ class _ReadingScreenState extends State<ReadingScreen> {
                               isCompleted
                                   ? 'Completed'
                                   : _cooldownLeft > Duration.zero
-                                      ? 'Hold on... ${_cooldownLeft.inSeconds + 1}s'
-                                      : 'Mark Task as Completed',
+                                  ? 'Hold on... ${_cooldownLeft.inSeconds + 1}s'
+                                  : 'Mark Task as Completed',
                             ),
                           ],
                         ),
@@ -359,15 +507,15 @@ class _ReadingScreenState extends State<ReadingScreen> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                if (_hasNextTask)
+                if (_canGoToNextTask)
                   SizedBox(
                     width: double.infinity,
                     height: 48,
                     child: OutlinedButton(
-                      onPressed: isCompleted ? _goToNextTask : null,
+                      onPressed: _goToNextTask,
                       style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.white,
-                        side: BorderSide(color: Colors.white.withOpacity(0.6)),
+                        foregroundColor: AppColors.textPrimary,
+                        side: const BorderSide(color: AppColors.progressTrack),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(16),
                         ),
@@ -375,15 +523,29 @@ class _ReadingScreenState extends State<ReadingScreen> {
                       child: const Text('Do Next Task'),
                     ),
                   ),
-                if (isCompleted && _hasCurrentActiveTask)
+                if (_showGoToActivePrompt)
                   Padding(
                     padding: const EdgeInsets.only(top: 10.0),
                     child: TextButton(
                       onPressed: _goToCurrentActiveTask,
-                      style: TextButton.styleFrom(foregroundColor: Colors.white),
-                      child: const Text('Go to Current Active Task'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: AppColors.textSecondary,
+                      ),
+                      child: const Text('Go to Active Task'),
                     ),
                   ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 10.0),
+                  child: TextButton(
+                    onPressed: () {
+                      Navigator.of(context).popUntil((route) => route.isFirst);
+                    },
+                    style: TextButton.styleFrom(
+                      foregroundColor: AppColors.textSecondary,
+                    ),
+                    child: const Text('Close'),
+                  ),
+                ),
               ],
             ),
           ),
@@ -399,4 +561,3 @@ class _TaskRef {
 
   _TaskRef(this.level, this.taskNumber);
 }
-

@@ -2,17 +2,18 @@ import 'package:flutter/material.dart';
 import 'dart:math' as math;
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:timezone/timezone.dart' as tz;
+import 'package:timezone/data/latest.dart' as tz;
+import 'package:flutter_native_timezone/flutter_native_timezone.dart';
 import 'package:daily_communication_tips/screens/reading_screen.dart';
 import 'package:daily_communication_tips/data/course_tasks.dart';
 import 'package:daily_communication_tips/screens/level_tasks_screen.dart';
+import 'services/gamification_service.dart';
 import 'services/storage_service.dart';
 import 'services/notification_service.dart';
-
-const Color kAccentPrimary = Color(0xFF5F67FF);
-const Color kAccentSecondary = Color(0xFF8AE8FF);
-const Color kAccentTertiary = Color(0xFFB8FFF2);
-const Color kDeepBlue = Color(0xFF4F6EEB);
-const Color kDeepPurple = Color(0xFF6D3EF3);
+import 'theme/app_colors.dart';
+import 'widgets/segmented_circular_progress.dart';
 
 final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
@@ -20,17 +21,21 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await NotificationService.initialize();
   await NotificationService.requestPermissions();
+  await StorageService.resetDailyNotificationFlagsIfNeeded();
   NotificationService.setNotificationTapHandler(_handleNotificationResponse);
   await NotificationService.scheduleDailyReminder(
-    time: const TimeOfDay(hour: 7, minute: 0),
+    time: const TimeOfDay(hour: 8, minute: 0),
   );
-  await NotificationService.scheduleStreakReminder(
-    time: const TimeOfDay(hour: 21, minute: 0),
-  );
+  await NotificationService.syncPinnedNotificationState();
   runApp(CommHelperApp());
 }
 
 void _handleNotificationResponse(NotificationResponse response) {
+  if (response.actionId == NotificationService.markDoneActionId) {
+    NotificationService.handleMarkDoneAction();
+    return;
+  }
+
   final payload = response.payload;
   if (payload == null) return;
   if (payload.startsWith('task:')) {
@@ -39,6 +44,8 @@ void _handleNotificationResponse(NotificationResponse response) {
       final level = int.tryParse(parts[1]);
       final taskNumber = int.tryParse(parts[2]);
       if (level != null && taskNumber != null) {
+        StorageService.markTodayTaskOpened();
+        NotificationService.syncPinnedNotificationState();
         appNavigatorKey.currentState?.push(
           MaterialPageRoute(
             builder: (_) => ReadingScreen(
@@ -58,7 +65,15 @@ class CommHelperApp extends StatelessWidget {
     return MaterialApp(
       navigatorKey: appNavigatorKey,
       title: 'Daily Communication Helper',
-      theme: ThemeData(primarySwatch: Colors.blue),
+      theme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: AppColors.bgBase,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: AppColors.accentPrimary,
+          brightness: Brightness.dark,
+        ),
+      ),
       home: HomeScreen(),
       debugShowCheckedModeBanner: false,
     );
@@ -75,10 +90,16 @@ class _HomeScreenState extends State<HomeScreen>
   int currentLevel = 1;
   int currentTaskNumber = 1;
   int streak = 0;
+  int bestStreak = 0;
+  bool pinTodayTaskInPanel = false;
   Set<String> completedTaskIds = {};
   Set<String> completedDates = {};
   bool unlockAllLevels = false;
+  int currentXP = 0;
+  Map<String, int> _taskXpMap = {};
   late final AnimationController _pulseController;
+  int freezeCount = 0;
+  final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
 
   @override
   void initState() {
@@ -87,9 +108,55 @@ class _HomeScreenState extends State<HomeScreen>
       vsync: this,
       duration: const Duration(seconds: 4),
     )..repeat(reverse: true);
+    _initTimeZone();
+    _initializeXpMap();
     _loadStreak();
+    _loadBestStreak();
+    _loadFreezes();
+    _loadPinSetting();
     _loadCompletedTasks();
     _loadUnlockAll();
+  }
+
+  Future<void> _initTimeZone() async {
+    tz.initializeTimeZones();
+    try {
+      final String timeZoneName = await FlutterNativeTimezone.getLocalTimezone();
+      tz.setLocalLocation(tz.getLocation(timeZoneName));
+    } catch (e) {
+      // Fallback to default/UTC if local timezone fails
+    }
+    _scheduleStreakExpiryNotifications();
+  }
+
+  void _initializeXpMap() {
+    int count1_5 = 0;
+    int count6_10 = 0;
+    int count11_15 = 0;
+    int count16_20 = 0;
+
+    for (var t in allTasks) {
+      if (t.level <= 5) count1_5++;
+      else if (t.level <= 10) count6_10++;
+      else if (t.level <= 15) count11_15++;
+      else if (t.level <= 20) count16_20++;
+    }
+
+    double xp1_5 = count1_5 > 0 ? 40000 / count1_5 : 0;
+    double xp6_10 = count6_10 > 0 ? 30000 / count6_10 : 0;
+    double xp11_15 = count11_15 > 0 ? 20000 / count11_15 : 0;
+    double xp16_20 = count16_20 > 0 ? 10000 / count16_20 : 0;
+
+    _taskXpMap.clear();
+    for (var t in allTasks) {
+      String id = StorageService.taskId(t.level, t.taskNumber);
+      int xp = 0;
+      if (t.level <= 5) xp = xp1_5.round();
+      else if (t.level <= 10) xp = xp6_10.round();
+      else if (t.level <= 15) xp = xp11_15.round();
+      else if (t.level <= 20) xp = xp16_20.round();
+      _taskXpMap[id] = xp;
+    }
   }
 
   Future<void> _loadStreak() async {
@@ -97,13 +164,42 @@ class _HomeScreenState extends State<HomeScreen>
     setState(() => streak = s);
   }
 
+  Future<void> _loadBestStreak() async {
+    final value = await StorageService.getBestStreak();
+    if (!mounted) return;
+    setState(() => bestStreak = value);
+  }
+
+  Future<void> _loadFreezes() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!prefs.containsKey('freeze_count')) {
+      await prefs.setInt('freeze_count', 3);
+    }
+    setState(() {
+      freezeCount = prefs.getInt('freeze_count') ?? 3;
+    });
+  }
+
+  Future<void> _loadPinSetting() async {
+    final value = await StorageService.getPinTodayTaskInPanel();
+    if (!mounted) return;
+    setState(() => pinTodayTaskInPanel = value);
+  }
+
   Future<void> _loadCompletedTasks() async {
     final ids = await StorageService.loadCompletedTaskIds();
     final dates = await StorageService.loadCompletedDates();
     final nextActive = _findNextIncompleteTaskFromIds(ids);
+    
+    int xp = 0;
+    for (var id in ids) {
+      xp += _taskXpMap[id] ?? 0;
+    }
+
     setState(() {
       completedTaskIds = ids;
       completedDates = dates;
+      currentXP = xp;
       if (nextActive != null) {
         currentLevel = nextActive.level;
         currentTaskNumber = nextActive.taskNumber;
@@ -120,20 +216,89 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  Future<void> _scheduleStreakExpiryNotifications() async {
+    final now = DateTime.now();
+    final todayKey = '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    
+    // Cancel existing streak notifications first
+    await _notificationsPlugin.cancel(1001);
+    await _notificationsPlugin.cancel(1002);
+    await _notificationsPlugin.cancel(1003);
+    await _notificationsPlugin.cancel(1004);
+
+    if (completedDates.contains(todayKey)) return;
+
+    final androidDetails = const AndroidNotificationDetails(
+      'streak_expiry_channel',
+      'Streak Expiry',
+      channelDescription: 'Notifications for expiring streaks',
+      importance: Importance.high,
+      priority: Priority.high,
+    );
+    final details = NotificationDetails(android: androidDetails);
+
+    void schedule(int hour, int id, String title, String body) {
+      final scheduledDate = tz.TZDateTime(
+        tz.local,
+        now.year,
+        now.month,
+        now.day,
+        hour,
+      );
+      if (scheduledDate.isAfter(tz.TZDateTime.now(tz.local))) {
+        _notificationsPlugin.zonedSchedule(
+          id,
+          title,
+          body,
+          scheduledDate,
+          details,
+          androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+          uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+        );
+      }
+    }
+
+    if (streak > 0) {
+      schedule(12, 1001, 'Keep the streak alive! 🔥', '12 hours left to complete today\'s task.');
+      schedule(18, 1002, 'Don\'t lose your progress! ⏳', '6 hours remaining to save your $streak-day streak.');
+      schedule(21, 1003, 'Streak expiring soon! ⚠️', '3 hours left! Take 2 minutes to complete your task.');
+      schedule(23, 1004, 'Last chance! 🚨', '1 hour left to save your streak!');
+    } else {
+      schedule(12, 1001, 'Start your journey 🚀', 'Start your productive journey. Follow a task today.');
+      schedule(18, 1002, 'Time for growth 🌱', 'Take a moment for yourself. Start your streak today.');
+    }
+  }
+
   void _startTask() {
     final nextActive = _findNextIncompleteTask();
     final startLevel = nextActive?.level ?? currentLevel;
     final startTaskNumber = nextActive?.taskNumber ?? currentTaskNumber;
+    StorageService.markTodayTaskOpened();
+    NotificationService.syncPinnedNotificationState();
+    _openTask(startLevel, startTaskNumber);
+  }
+
+  void _openTask(
+    int level,
+    int taskNumber, {
+    bool openedFromCompletedTask = false,
+  }) {
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => ReadingScreen(
-          currentLevel: startLevel,
-          currentTaskNumber: startTaskNumber,
+          currentLevel: level,
+          currentTaskNumber: taskNumber,
           onTaskComplete: _advanceTask,
+          openedFromCompletedTask: openedFromCompletedTask,
         ),
       ),
-    );
+    ).then((_) {
+      _loadStreak();
+      _loadBestStreak();
+      _loadCompletedTasks();
+      _loadFreezes();
+    });
   }
 
   void _advanceTask(int level, int taskNumber) {
@@ -142,17 +307,25 @@ class _HomeScreenState extends State<HomeScreen>
       currentTaskNumber = taskNumber;
     });
     _loadStreak(); // Refresh streak after task completion
+    _loadBestStreak();
     _loadCompletedTasks();
   }
 
   Future<void> _resetAllProgress() async {
     await StorageService.resetAllProgress();
+    final preservedStreak = await StorageService.getStreak();
+    final preservedBestStreak = await StorageService.getBestStreak();
     setState(() {
       currentLevel = 1;
       currentTaskNumber = 1;
-      streak = 0;
+      streak = preservedStreak;
+      bestStreak = preservedBestStreak;
+      pinTodayTaskInPanel = false;
       completedTaskIds = {};
+      completedDates = {};
       unlockAllLevels = false;
+      currentXP = 0;
+      freezeCount = 3;
     });
   }
 
@@ -167,6 +340,225 @@ class _HomeScreenState extends State<HomeScreen>
         content: Text('Max level reached. All levels unlocked.'),
         behavior: SnackBarBehavior.floating,
         duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Widget _buildPathSections(_TaskRef? nextActive, int nextActiveIndex) {
+    const groups = [
+      _PathGroup(
+        title: 'Foundation',
+        subtitle: 'Levels 1-5',
+        minLevel: 1,
+        maxLevel: 5,
+      ),
+      _PathGroup(
+        title: 'Practice',
+        subtitle: 'Levels 6-10',
+        minLevel: 6,
+        maxLevel: 10,
+      ),
+      _PathGroup(
+        title: 'Application',
+        subtitle: 'Levels 11-15',
+        minLevel: 11,
+        maxLevel: 15,
+      ),
+      _PathGroup(
+        title: 'Mastery',
+        subtitle: 'Levels 16-20',
+        minLevel: 16,
+        maxLevel: 20,
+      ),
+    ];
+
+    return Column(
+      children: [
+        for (final group in groups) ...[
+          _buildPathGroupTile(group, nextActive, nextActiveIndex),
+          if (group != groups.last) const SizedBox(height: 8),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildPathGroupTile(
+    _PathGroup group,
+    _TaskRef? nextActive,
+    int nextActiveIndex,
+  ) {
+    final sectionTasks = allTasks
+        .where((t) => t.level >= group.minLevel && t.level <= group.maxLevel)
+        .toList();
+    final doneCount = sectionTasks
+        .where((t) => completedTaskIds.contains(StorageService.taskId(t.level, t.taskNumber)))
+        .length;
+    final hasActiveInSection =
+        nextActive != null &&
+        nextActive.level >= group.minLevel &&
+        nextActive.level <= group.maxLevel;
+    final activeId = nextActive == null
+        ? null
+        : StorageService.taskId(nextActive.level, nextActive.taskNumber);
+
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.bgElevated,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.progressTrack),
+      ),
+      child: Theme(
+        data: Theme.of(context).copyWith(
+          dividerColor: Colors.transparent,
+          splashColor: Colors.transparent,
+          highlightColor: Colors.transparent,
+        ),
+        child: ExpansionTile(
+          initiallyExpanded: hasActiveInSection,
+          tilePadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+          childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+          iconColor: AppColors.textSecondary,
+          collapsedIconColor: AppColors.textSecondary,
+          title: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  group.title,
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              _StatusPill(
+                text: '$doneCount/${sectionTasks.length}',
+                color: AppColors.textSecondary,
+              ),
+            ],
+          ),
+          subtitle: Text(
+            group.subtitle,
+            style: const TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 10.5,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          children: [
+            for (final task in sectionTasks)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: _buildPathTaskRow(task, activeId, nextActiveIndex),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPathTaskRow(
+    DailyTask task,
+    String? activeId,
+    int nextActiveIndex,
+  ) {
+    final globalIndex = allTasks.indexWhere(
+      (t) => t.level == task.level && t.taskNumber == task.taskNumber,
+    );
+    final id = StorageService.taskId(task.level, task.taskNumber);
+    final isDone = completedTaskIds.contains(id);
+    final isActive = activeId == id;
+    final isLocked =
+        !unlockAllLevels &&
+        !isDone &&
+        !isActive &&
+        nextActiveIndex >= 0 &&
+        globalIndex > nextActiveIndex;
+
+    return Opacity(
+      opacity: isLocked ? 0.65 : 1,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: isLocked
+            ? null
+            : () => _openTask(
+                  task.level,
+                  task.taskNumber,
+                  openedFromCompletedTask: isDone,
+                ),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+          decoration: BoxDecoration(
+            color: AppColors.bgCard,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: isActive ? AppColors.accentSecondary : AppColors.progressTrack,
+            ),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                isDone
+                    ? Icons.check_circle_rounded
+                    : isLocked
+                    ? Icons.lock_outline_rounded
+                    : Icons.radio_button_unchecked_rounded,
+                size: 17,
+                color: isDone
+                    ? AppColors.progressGood
+                    : isActive
+                    ? AppColors.accentSecondary
+                    : AppColors.textTertiary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          'L${task.level} - T${task.taskNumber}',
+                          style: const TextStyle(
+                            color: AppColors.textSecondary,
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        if (isDone)
+                          const _StatusPill(
+                            text: 'Completed',
+                            color: AppColors.progressGood,
+                          )
+                        else if (isActive)
+                          const _StatusPill(
+                            text: 'Active',
+                            color: AppColors.accentSecondary,
+                          )
+                        else if (isLocked)
+                          const _StatusPill(
+                            text: 'Locked',
+                            color: AppColors.textTertiary,
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      task.content,
+                      style: const TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 12,
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -191,69 +583,100 @@ class _HomeScreenState extends State<HomeScreen>
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (context) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  height: 4,
-                  width: 40,
-                  margin: const EdgeInsets.only(bottom: 16),
-                  decoration: BoxDecoration(
-                    color: Colors.grey[400],
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-                ListTile(
-                  leading: const Icon(Icons.lock_open_rounded),
-                  title: const Text('Unlock All Levels'),
-                  subtitle: const Text(
-                    'Access any level without completing tasks',
-                  ),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    await _unlockAllLevels();
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.refresh_rounded),
-                  title: const Text('Reset All Progress'),
-                  subtitle: const Text(
-                    'Factory reset: streaks, progress, and unlocks',
-                  ),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    await _resetAllProgress();
-                  },
-                ),
-                const Divider(),
-                ListTile(
-                  leading: const Icon(Icons.info_outline_rounded),
-                  title: const Text('About'),
-                  subtitle: const Text('A personal note from the developer'),
-                  onTap: () {
-                    showDialog(
-                      context: context,
-                      builder: (_) => AlertDialog(
-                        title: const Text('About'),
-                        content: const Text(
-                          'The developer built this app for themselves to use.',
-                        ),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(context),
-                            child: const Text('OK'),
-                          ),
-                        ],
+        bool localPinSetting = pinTodayTaskInPanel;
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      height: 4,
+                      width: 40,
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        color: Colors.grey[400],
+                        borderRadius: BorderRadius.circular(8),
                       ),
-                    );
-                  },
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.lock_open_rounded),
+                      title: const Text('Unlock All Levels'),
+                      subtitle: const Text(
+                        'Access any level without completing tasks',
+                      ),
+                      onTap: () async {
+                        Navigator.pop(context);
+                        await _unlockAllLevels();
+                      },
+                    ),
+                    ListTile(
+                      leading: Icon(
+                        localPinSetting
+                            ? Icons.push_pin_rounded
+                            : Icons.push_pin_outlined,
+                      ),
+                      title: const Text(
+                        'Pin today\'s task in notification panel',
+                      ),
+                      subtitle: const Text(
+                        'Keep it visible until done or day ends',
+                      ),
+                      trailing: Switch(
+                        value: localPinSetting,
+                        onChanged: (value) async {
+                          setModalState(() => localPinSetting = value);
+                          if (mounted) {
+                            setState(() => pinTodayTaskInPanel = value);
+                          }
+                          await StorageService.setPinTodayTaskInPanel(value);
+                          await NotificationService.syncPinnedNotificationState();
+                        },
+                      ),
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.refresh_rounded),
+                      title: const Text('Reset All Progress'),
+                      subtitle: const Text(
+                        'Factory reset: streaks, progress, and unlocks',
+                      ),
+                      onTap: () async {
+                        Navigator.pop(context);
+                        await _resetAllProgress();
+                      },
+                    ),
+                    const Divider(),
+                    ListTile(
+                      leading: const Icon(Icons.info_outline_rounded),
+                      title: const Text('About'),
+                      subtitle: const Text(
+                        'A personal note from the developer',
+                      ),
+                      onTap: () {
+                        showDialog(
+                          context: context,
+                          builder: (_) => AlertDialog(
+                            title: const Text('About'),
+                            content: const Text(
+                              'The developer built this app for themselves to use.',
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(context),
+                                child: const Text('OK'),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ],
                 ),
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         );
       },
     );
@@ -429,30 +852,46 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  Widget _buildStreakChip() {
+  Widget _buildFireStreak() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFFFFB347), Color(0xFFFF5F6D)],
-        ),
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFFFF5F6D).withOpacity(0.4),
-            blurRadius: 12,
-            offset: const Offset(0, 6),
-          ),
-        ],
+        color: AppColors.bgCard,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.progressTrack),
       ),
       child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.local_fire_department_rounded, color: Colors.white),
+          const Icon(
+            Icons.local_fire_department_rounded,
+            color: Color(0xFFFF5F6D),
+            size: 20,
+          ),
           const SizedBox(width: 6),
           Text(
             '$streak',
             style: const TextStyle(
-              fontSize: 18,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+            ),
+          ),
+          Container(
+            width: 1,
+            height: 20,
+            color: Colors.white.withOpacity(0.2),
+            margin: const EdgeInsets.symmetric(horizontal: 10),
+          ),
+          const Icon(
+            Icons.ac_unit_rounded,
+            color: Colors.blue,
+            size: 20,
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '$freezeCount',
+            style: const TextStyle(
               fontWeight: FontWeight.bold,
               color: Colors.white,
             ),
@@ -501,7 +940,7 @@ class _HomeScreenState extends State<HomeScreen>
                   strokeWidth: 5,
                   backgroundColor: Colors.transparent,
                   valueColor: const AlwaysStoppedAnimation<Color>(
-                    kAccentSecondary,
+                    AppColors.accentSecondary,
                   ),
                 ),
                 Text(
@@ -529,81 +968,95 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  Widget _buildProgressRing(double progress, int percent) {
-    return SizedBox(
-      width: 150,
-      height: 150,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          SizedBox(
-            width: 140,
-            height: 140,
-            child: CircularProgressIndicator(
-              value: 1,
-              strokeWidth: 12,
-              valueColor: AlwaysStoppedAnimation<Color>(
-                Colors.white.withOpacity(0.12),
-              ),
-            ),
-          ),
-          SizedBox(
-            width: 140,
-            height: 140,
-            child: ShaderMask(
-              shaderCallback: (rect) {
-                return SweepGradient(
-                  startAngle: -math.pi / 2,
-                  endAngle: (math.pi * 2) - (math.pi / 2),
-                  colors: const [
-                    kAccentPrimary,
-                    kAccentSecondary,
-                    kAccentTertiary,
-                  ],
-                  stops: const [0.0, 0.6, 1.0],
-                ).createShader(rect);
-              },
-              child: CircularProgressIndicator(
-                value: progress,
-                strokeWidth: 12,
-                backgroundColor: Colors.transparent,
-                valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
-              ),
-            ),
-          ),
-          Container(
-            width: 106,
-            height: 106,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: Colors.white.withOpacity(0.1),
-              border: Border.all(color: Colors.white.withOpacity(0.2)),
-            ),
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    '$percent%',
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white.withOpacity(0.95),
-                    ),
-                  ),
-                  Text(
-                    'Overall',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white.withOpacity(0.75),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+  Widget _buildProgressRing(
+    double progress, {
+    required String primaryText,
+    required String secondaryText,
+    required bool todayCompleted,
+  }) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeOut,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(
+          color: todayCompleted
+              ? AppColors.progressGood.withOpacity(0.42)
+              : AppColors.progressTrack.withOpacity(0.35),
+          width: 1.1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: todayCompleted
+                ? AppColors.progressGood.withOpacity(0.12)
+                : AppColors.accentSecondary.withOpacity(0.08),
+            blurRadius: todayCompleted ? 16 : 10,
           ),
         ],
+      ),
+      child: SegmentedCircularProgress(
+        progress: progress,
+        size: 150,
+        strokeWidth: 12,
+        segments: 4,
+        gapDegrees: 4,
+        gradientColors: const [
+          AppColors.accentSecondary,
+          AppColors.accentFocus,
+          Color(0xFF8C6FFF),
+        ],
+        trackColor: AppColors.progressTrack.withOpacity(0.35),
+        glowColor: AppColors.accentSecondary,
+        center: Container(
+          width: 106,
+          height: 106,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                AppColors.bgCard,
+                AppColors.bgElevated.withOpacity(0.85),
+              ],
+            ),
+            border: Border.all(color: AppColors.progressTrack),
+          ),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  todayCompleted
+                      ? Icons.verified_rounded
+                      : Icons.trending_up_rounded,
+                  size: 16,
+                  color: todayCompleted
+                      ? AppColors.progressGood
+                      : AppColors.accentSecondary,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  primaryText,
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
+                Text(
+                  secondaryText,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -682,36 +1135,47 @@ class _HomeScreenState extends State<HomeScreen>
   Widget build(BuildContext context) {
     final communicationTotal = allTasks.length;
     final communicationCompleted = completedTaskIds.length;
-    const smallTalkTotal = 0;
-    const smallTalkCompleted = 0;
-    final totalTasks = communicationTotal + smallTalkTotal;
-    final totalCompleted = communicationCompleted + smallTalkCompleted;
+    final totalTasks = communicationTotal;
+    final totalCompleted = communicationCompleted;
     final overallProgress = unlockAllLevels || totalTasks == 0
         ? 1.0
         : (totalCompleted / totalTasks).clamp(0.0, 1.0);
     final overallPercent = (overallProgress * 100).round();
-    final communicationPercent = communicationTotal == 0
-        ? 0
-        : ((communicationCompleted / communicationTotal) * 100).round();
-    final smallTalkPercent = smallTalkTotal == 0
-        ? 0
-        : ((smallTalkCompleted / smallTalkTotal) * 100).round();
-    final communicationComplete =
-        communicationTotal == 0 || communicationCompleted == communicationTotal;
-    final smallTalkComplete =
-        smallTalkTotal == 0 || smallTalkCompleted == smallTalkTotal;
-    final allSectionsComplete = communicationComplete && smallTalkComplete;
-    final gatedLevel = unlockAllLevels || allSectionsComplete
+    final nextActive = _findNextIncompleteTask();
+    final nextActiveIndex = nextActive == null
+        ? -1
+        : allTasks.indexWhere(
+            (t) =>
+                t.level == nextActive.level &&
+                t.taskNumber == nextActive.taskNumber,
+          );
+    final screenWidth = MediaQuery.of(context).size.width;
+    final horizontalPadding = screenWidth < 370 ? 18.0 : 24.0;
+    final now = DateTime.now();
+    final todayKey =
+        '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    final todayCompleted = completedDates.contains(todayKey);
+    final taskForCard = allTasks.firstWhere(
+      (t) =>
+          t.level == (nextActive?.level ?? currentLevel) &&
+          t.taskNumber == (nextActive?.taskNumber ?? currentTaskNumber),
+      orElse: () => allTasks.first,
+    );
+    final taskPreview = taskForCard.content.length > 110
+        ? '${taskForCard.content.substring(0, 110)}...'
+        : taskForCard.content;
+    final motivation = todayCompleted
+        ? 'Nice consistency. See you tomorrow for the next step.'
+        : streak >= 7
+        ? 'You are on a ${streak}-day run. Keep the streak alive today.'
+        : 'Tiny daily practice builds confident conversations.';
+    final gatedLevel = unlockAllLevels
         ? currentLevel
         : math.min(currentLevel, 19);
-    final sectionProgress = [
-      {'label': 'Communication', 'percent': communicationPercent},
-      {'label': 'Small talk', 'percent': smallTalkPercent},
-    ];
-    final nextActive = _findNextIncompleteTask();
-    final screenWidth = MediaQuery.of(context).size.width;
-    final horizontalPadding = screenWidth < 370 ? 16.0 : 24.0;
-    final gridCrossAxis = screenWidth < 360 ? 3 : 4;
+    final currentBadgeName = GamificationService.currentBadgeName(gatedLevel);
+    final unlockedBadges = GamificationService.unlockedBadgeCount(gatedLevel);
+    final nextBadgeLevel = GamificationService.nextBadgeMilestone(gatedLevel);
+    final nextBadgeName = GamificationService.nextBadgeName(gatedLevel);
 
     return Scaffold(
       body: Container(
@@ -719,7 +1183,7 @@ class _HomeScreenState extends State<HomeScreen>
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [kDeepBlue, kDeepPurple],
+            colors: [AppColors.bgBase, AppColors.bgElevated],
           ),
         ),
         child: SafeArea(
@@ -728,229 +1192,361 @@ class _HomeScreenState extends State<HomeScreen>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Header
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.center,
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Image.asset(
-                      'assets/images/title.png',
-                      height: 84,
-                      fit: BoxFit.contain,
-                    ),
-                    const SizedBox(height: 16),
                     Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        Flexible(
-                          fit: FlexFit.loose,
-                          child: _buildLevelBadge(gatedLevel),
+                        SizedBox(
+                          height: 50,
+                          width: 50,
+                          child: LevelBadgeSprite(level: gatedLevel, size: 50),
                         ),
-                        const Spacer(),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
+                        const SizedBox(width: 10),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Container(
-                              decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(14),
-                              ),
-                              child: IconButton(
-                                icon: const Icon(
-                                  Icons.calendar_month_rounded,
-                                  color: Colors.white,
-                                ),
-                                onPressed: _showCalendarDialog,
-                                tooltip: 'Monthly progress',
+                            Text(
+                              'Level $gatedLevel',
+                              style: const TextStyle(
+                                color: AppColors.textPrimary,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13,
                               ),
                             ),
-                            const SizedBox(width: 8),
-                            _buildStreakChip(),
-                            const SizedBox(width: 10),
-                            Container(
-                              decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-                              child: IconButton(
-                                icon: const Icon(
-                                  Icons.settings_rounded,
-                                  color: Colors.white,
-                                ),
-                                onPressed: _showSettingsSheet,
+                            Text(
+                              '${currentXP.toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]},')} XP',
+                              style: TextStyle(
+                                color: AppColors.accentSecondary,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 0.5,
                               ),
                             ),
                           ],
+                        ),
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        _buildFireStreak(),
+                        const SizedBox(width: 8),
+                        Container(
+                          decoration: BoxDecoration(
+                            color: AppColors.bgCard,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: IconButton(
+                            icon: const Icon(
+                              Icons.calendar_month_rounded,
+                              color: AppColors.textSecondary,
+                            ),
+                            onPressed: _showCalendarDialog,
+                            tooltip: 'Monthly progress',
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          decoration: BoxDecoration(
+                            color: AppColors.bgCard,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: IconButton(
+                            icon: const Icon(
+                              Icons.settings_rounded,
+                              color: AppColors.textSecondary,
+                            ),
+                            onPressed: _showSettingsSheet,
+                          ),
                         ),
                       ],
                     ),
                   ],
                 ),
-                const SizedBox(height: 40),
-
-                // Main Action Card
+                const SizedBox(height: 18),
+                Center(
+                  child: Image.asset(
+                    'assets/images/title.png',
+                    height: 62,
+                    fit: BoxFit.contain,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Center(
+                  child: TweenAnimationBuilder<double>(
+                    tween: Tween<double>(begin: 0, end: overallProgress),
+                    duration: const Duration(milliseconds: 700),
+                    curve: Curves.easeOutCubic,
+                    builder: (context, value, child) {
+                      return _buildProgressRing(
+                        value,
+                        primaryText: '$overallPercent%',
+                        secondaryText: 'Overall',
+                        todayCompleted: todayCompleted,
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Center(
+                  child: Text(
+                    'Course progress: $overallPercent%',
+                    style: TextStyle(
+                      color: AppColors.textSecondary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 9,
+                        ),
+                        decoration: BoxDecoration(
+                          color: AppColors.bgCard,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppColors.progressTrack),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              todayCompleted
+                                  ? Icons.check_circle_rounded
+                                  : Icons.circle_outlined,
+                              size: 16,
+                              color: todayCompleted
+                                  ? AppColors.progressGood
+                                  : AppColors.textTertiary,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                todayCompleted
+                                    ? 'Daily win recorded'
+                                    : 'Complete today for a daily win',
+                                style: const TextStyle(
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.textSecondary,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 9,
+                        ),
+                        decoration: BoxDecoration(
+                          color: AppColors.bgCard,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppColors.progressTrack),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.workspace_premium_rounded,
+                              size: 16,
+                              color: AppColors.accentSecondary,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                nextBadgeLevel == null
+                                    ? 'All badge tiers unlocked'
+                                    : 'Next reward at Lv $nextBadgeLevel',
+                                style: const TextStyle(
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.textSecondary,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeOut,
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppColors.bgCard,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: AppColors.progressTrack),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.workspace_premium_rounded,
+                        size: 18,
+                        color: AppColors.accentSecondary,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          nextBadgeLevel == null
+                              ? 'Badge: $currentBadgeName ($unlockedBadges/${GamificationService.milestoneLevels.length})'
+                              : 'Badge: $currentBadgeName - Next at Level $nextBadgeLevel ($nextBadgeName)',
+                          style: const TextStyle(
+                            color: AppColors.textSecondary,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 18),
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(2),
                   decoration: BoxDecoration(
                     gradient: const LinearGradient(
-                      colors: [
-                        Color(0xFF7F7FD5),
-                        Color(0xFF86A8E7),
-                        Color(0xFF91EAE4),
-                      ],
+                      colors: [AppColors.accentPrimary, AppColors.accentFocus],
                     ),
-                    borderRadius: BorderRadius.circular(26),
+                    borderRadius: BorderRadius.circular(24),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.2),
-                        blurRadius: 24,
-                        offset: const Offset(0, 12),
+                        color: Colors.black.withOpacity(0.22),
+                        blurRadius: 18,
+                        offset: const Offset(0, 10),
                       ),
                     ],
                   ),
                   child: Container(
-                    padding: const EdgeInsets.all(22),
+                    padding: const EdgeInsets.all(18),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(24),
-                      border: Border.all(color: Colors.white.withOpacity(0.35)),
+                      color: AppColors.bgCard,
+                      borderRadius: BorderRadius.circular(22),
+                      border: Border.all(color: AppColors.progressTrack),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            Expanded(
-                              child: Column(
-                                children: [
-                                  TweenAnimationBuilder<double>(
-                                    tween: Tween<double>(
-                                      begin: 0,
-                                      end: overallProgress,
-                                    ),
-                                    duration: const Duration(milliseconds: 900),
-                                    curve: Curves.easeOutCubic,
-                                    builder: (context, value, child) {
-                                      return _buildProgressRing(
-                                        value,
-                                        overallPercent,
-                                      );
-                                    },
-                                  ),
-                                  const SizedBox(height: 12),
-                                  SizedBox(
-                                    height: 34,
-                                    child: ElevatedButton(
-                                      onPressed: _startTask,
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor: const Color(
-                                          0xFF5F67FF,
-                                        ),
-                                        foregroundColor: Colors.white,
-                                        elevation: 3,
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 18,
-                                        ),
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            14,
-                                          ),
-                                        ),
-                                      ),
-                                      child: const Text(
-                                        'Do task',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ],
+                        Text(
+                          'Today\'s task',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.textPrimary,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Level ${nextActive?.level ?? currentLevel} - Task ${nextActive?.taskNumber ?? currentTaskNumber}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: AppColors.textSecondary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          taskPreview,
+                          style: TextStyle(
+                            fontSize: 13,
+                            height: 1.4,
+                            color: AppColors.textSecondary,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        SizedBox(
+                          width: double.infinity,
+                          height: 46,
+                          child: ElevatedButton(
+                            onPressed: todayCompleted ? null : _startTask,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppColors.accentPrimary,
+                              foregroundColor: AppColors.textPrimary,
+                              disabledBackgroundColor: Colors.white24,
+                              disabledForegroundColor: AppColors.textSecondary,
+                              elevation: 4,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
                               ),
                             ),
-                            const SizedBox(width: 18),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'SECTION PROGRESS',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 2,
-                                    color: Colors.white.withOpacity(0.85),
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                                ...sectionProgress.map(
-                                  (section) => Padding(
-                                    padding: const EdgeInsets.only(bottom: 10),
-                                    child: _buildMiniRing(
-                                      section['percent'] as int,
-                                      section['label'] as String,
-                                      sectionProgress.length,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                Text(
-                                  allSectionsComplete
-                                      ? 'Course complete. You finished all 20 levels.'
-                                      : nextActive == null
-                                      ? 'Complete other sections to reach Level 20.'
-                                      : 'Next up: Level ${nextActive.level} Task ${nextActive.taskNumber}',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: Colors.white.withOpacity(0.8),
-                                  ),
-                                ),
-                              ],
+                            child: Text(
+                              todayCompleted
+                                  ? 'Completed for today'
+                                  : 'Follow today\'s task',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
-                          ],
+                          ),
                         ),
                       ],
                     ),
                   ),
                 ),
-
-                const SizedBox(height: 40),
-                _SectionCard(
-                  title: 'Communication tips',
-                  subtitle: 'Levels, tasks, and mastery',
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => SectionsScreen(
-                          initialIndex: 0,
-                          gatedLevel: gatedLevel,
-                          unlockAllLevels: unlockAllLevels,
-                          onTaskComplete: _advanceTask,
+                const SizedBox(height: 14),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: AppColors.bgCard,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: AppColors.progressTrack),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Path',
+                        style: TextStyle(
+                          color: AppColors.textPrimary,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
-                    );
-                  },
+                      const SizedBox(height: 4),
+                      Text(
+                        'Complete in order. Revisit any completed task anytime.',
+                        style: const TextStyle(
+                          color: AppColors.textSecondary,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      _buildPathSections(nextActive, nextActiveIndex),
+                    ],
+                  ),
                 ),
-                const SizedBox(height: 20),
-                _SectionCard(
-                  title: 'Small talk expert',
-                  subtitle: 'Coming soon',
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => SectionsScreen(
-                          initialIndex: 1,
-                          gatedLevel: gatedLevel,
-                          unlockAllLevels: unlockAllLevels,
-                          onTaskComplete: _advanceTask,
-                        ),
-                      ),
-                    );
-                  },
+                const SizedBox(height: 14),
+                Center(
+                  child: Text(
+                    motivation,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: AppColors.textSecondary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -966,6 +1562,20 @@ class _TaskRef {
   final int taskNumber;
 
   _TaskRef(this.level, this.taskNumber);
+}
+
+class _PathGroup {
+  final String title;
+  final String subtitle;
+  final int minLevel;
+  final int maxLevel;
+
+  const _PathGroup({
+    required this.title,
+    required this.subtitle,
+    required this.minLevel,
+    required this.maxLevel,
+  });
 }
 
 class _SectionCard extends StatelessWidget {
@@ -1024,6 +1634,32 @@ class _SectionCard extends StatelessWidget {
               color: Colors.white.withOpacity(0.8),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  final String text;
+  final Color color;
+
+  const _StatusPill({required this.text, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.16),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: color,
+          fontSize: 9.5,
+          fontWeight: FontWeight.w700,
         ),
       ),
     );
@@ -1104,7 +1740,7 @@ class _SectionsScreenState extends State<SectionsScreen> {
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [kDeepBlue, kDeepPurple],
+            colors: [AppColors.bgBase, AppColors.bgElevated],
           ),
         ),
         child: SafeArea(
@@ -1351,11 +1987,11 @@ class _DayCell extends StatelessWidget {
           : Container(
               decoration: BoxDecoration(
                 color: isDone
-                    ? kAccentPrimary.withOpacity(0.8)
+                    ? AppColors.accentPrimary.withOpacity(0.8)
                     : Colors.transparent,
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(
-                  color: isDone ? kAccentPrimary : Colors.black12,
+                  color: isDone ? AppColors.accentPrimary : Colors.black12,
                 ),
               ),
               child: Center(

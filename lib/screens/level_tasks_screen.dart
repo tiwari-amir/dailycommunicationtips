@@ -56,6 +56,7 @@ class _LevelTasksScreenState extends State<LevelTasksScreen> {
           currentLevel: nextActive.level,
           currentTaskNumber: nextActive.taskNumber,
           onTaskComplete: widget.onTaskComplete,
+          openedFromCompletedTask: false,
         ),
       ),
     );
@@ -209,6 +210,7 @@ class _LevelTasksScreenState extends State<LevelTasksScreen> {
                         currentLevel: widget.level,
                         currentTaskNumber: task.taskNumber,
                         onTaskComplete: widget.onTaskComplete,
+                        openedFromCompletedTask: isCompleted,
                       ),
                     ),
                   ).then((_) => _loadCompletedTasks());
